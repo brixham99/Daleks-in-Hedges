@@ -29,6 +29,21 @@ Use the **Chameleon Cloak** to turn into a hedge for up to 4 seconds. Daleks can
 
 Step onto the TARDIS to go to the next level. Level N has 3 + 2 × (N − 1) Daleks, up to 15. If you are exterminated, you return to the title screen.
 
+## Two players on a local network
+
+Two copies of the game on the same network can play one maze together, Archie and Holly at once. It's a race to the TARDIS: the first one in gets the +50 and waits inside, and the TARDIS leaves when the other player gets there too.
+
+- **Host:** on the title screen press **N**, choose **Host a game** and pick Archie or Holly with Left / Right. The other player gets the other character.
+- **Join:** press **N** on the other computer and choose **Join a game**. Games on the network appear within about 3 seconds; pick one and press Enter.
+
+Both players start in a Dalek-free area round the TARDIS. Daleks hunt either player. If one is exterminated, the camera follows the other; if they reach the TARDIS, both go on to the next level. If both are exterminated, it's game over and each player can post their own score. If the connection drops for 3 seconds, each game carries on alone.
+
+The first time you host, your Mac may ask whether to allow incoming network connections for Python. Click **Allow**.
+
+Ports: UDP **47474** to find games, and UDP **47475** for the game itself.
+
+Some Wi-Fi networks (guest, school or office networks) block broadcasts, so the game won't appear in the list. Then join by address instead: the host's lobby screen shows its IP address, and the other player runs `python3 game.py --join 192.168.1.20` (with that address).
+
 ## Controls
 
 | Key | Action |
@@ -41,6 +56,7 @@ Step onto the TARDIS to go to the next level. Level N has 3 + 2 × (N − 1) Dal
 | Esc | Quit |
 | Title screen: Left / Right, A / D or 1 / 2 | Choose a character |
 | Title screen: Enter or Space | Start |
+| Title screen: N | Two players on a local network |
 | After extermination: Enter, Space or R | Back to the title screen |
 
 ## Scoring
@@ -73,6 +89,9 @@ Note: the free [dreamlo](http://dreamlo.com) tier keeps the private code in the 
 | `--scene NAME` | Set up a test scene, then screenshot |
 | `--scene-ms N` | How far into the scene (ms) to take the shot |
 | `--demo-scores` | Fill the Top 10 with sample names (never sent) |
+| `--host` | Host a network game straight away (as `--character`) |
+| `--join HOST[:PORT]` | Join the network game at that address, skipping discovery |
+| `--net-port N` | UDP game port to host on or join (default 47475) |
 
 ### Screenshots without a screen
 
@@ -82,6 +101,16 @@ SDL_VIDEODRIVER=dummy python3 game.py --seed 1 --scene tardis_demat --scene-ms 6
 ```
 
 Scenes: `dalek`, `laser`, `telegraph`, `disguise` (the cloak), `tardis`, `tardis_demat`, `tardis_exit`, `title`, `title_top10`, `score_hud`, `name_entry`. Headless runs never contact dreamlo or write the score file.
+
+### Testing network play
+
+The networking lives in `net.py` (standard library only). `tools/net_selftest.py` runs a host and a joiner in one process over localhost and checks discovery, sync, extermination, the shared TARDIS, game over and a dropped connection. It uses a throwaway score file and never contacts dreamlo:
+
+```bash
+SDL_VIDEODRIVER=dummy python3 tools/net_selftest.py
+```
+
+Two separate copies on one machine also work: `python3 game.py --host --net-port 47480` in one terminal and `python3 game.py --join 127.0.0.1:47480` in another. Add `--frames N` with `SDL_VIDEODRIVER=dummy` for a headless run that prints a summary.
 
 ### Sounds and graphics
 

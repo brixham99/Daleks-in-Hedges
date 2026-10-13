@@ -29,6 +29,8 @@ if os.environ.get("SDL_VIDEODRIVER") == "dummy":
 import numpy as np
 import pygame
 
+import net
+
 # Classic 2:1 isometric projection. (tx, ty) is the top vertex of a tile.
 #   screen_x = (col - row) * (TILE_W // 2)
 #   screen_y = (col + row) * (TILE_H // 2)
@@ -246,6 +248,15 @@ DREAMLO_URL = "http://dreamlo.com/lb/"
 DREAMLO_TIMEOUT = 4.0        # seconds; every request runs on a background thread
 SAVE_DIR = os.path.join(os.path.expanduser("~"), ".daleks_in_hedges")
 SAVE_FILE = os.path.join(SAVE_DIR, "scores.json")  # last name, local best, cached Top 10, unsent scores
+
+# Two players on a local network (see net.py for the transport).
+NET_KEY = pygame.K_n           # title screen: open the network lobby
+NET_SAFE_RADIUS = 6            # path cells round the start TARDIS that Daleks never enter
+NET_SMOOTH_MS = 60             # the other player and the Daleks ease towards each update
+NET_WATCH_PAN_MS = 600         # camera glide to the player you are watching
+NET_NOTICE_MS = 3500           # "Connection lost" stays up this long
+NET_JOIN_WAIT_S = 6.0          # no answer from a host in this long: back to the list
+DALEK_STATES = ("roam", "aim", "fire")
 
 KEY_ACTIONS = {
     pygame.K_LEFT: ("turn", -1),
@@ -1192,6 +1203,8 @@ class Dalek:
         self.turn_t0 = -1e9
         self.wait_until = 0.0
         self.state = "roam"  # roam, aim, fire
+        self.victim = "me"   # who it is aiming at: "me" (this game's player) or "other"
+        self.net_pos = None  # joiner: latest position from the host
         self.fire_at = 0.0
         self.aim_t0 = 0.0
         self.fire_t0 = 0.0
@@ -1222,6 +1235,61 @@ class Dalek:
             return FACING_SPRITE[self.prev_facing]
         return FACING_SPRITE[self.facing]
 
+
+class RemotePlayer:
+    """The other player in a network game, as this game last heard it."""
+
+    def __init__(self, character: str, name: str):
+        self.character = character
+        self.name = name
+        self.score = 0
+        self.reset((1, 1), DIR_SE)
+
+    def reset(self, cell, facing):
+        self.cell = tuple(cell)
+        self.src = self.dst = self.cell
+        self.moving = False
+        self.u = 0.0
+        self.facing = facing
+        self.disguised = False
+        self.disguise_t0 = -1e9
+        self.dead = False
+        self.death_t0 = 0.0
+        self.shooter = None
+        self.in_tardis = False
+        self.pos = [float(cell[0]), float(cell[1])]
+        self.dead_pos = tuple(self.pos)
+        self.feet = (0, 0)
+
+    def target_pos(self):
+        if self.moving:
+            sc, sr = self.src
+            dc, dr = self.dst
+            u = ease(self.u)
+            return sc + (dc - sc) * u, sr + (dr - sr) * u
+        return float(self.cell[0]), float(self.cell[1])
+
+    def cells(self):
+        cells = {self.cell}
+        if self.moving:
+            cells.add(self.dst)
+        return cells
+
+    def exposed(self) -> bool:
+        return not (self.disguised or self.dead or self.in_tardis)
+
+    def ease_towards(self, dt: float):
+        if self.dead:
+            return
+        if self.moving:  # carry the hop on between packets
+            self.u = min(1.0, self.u + dt / MOVE_MS)
+        tx, ty = self.target_pos()
+        if abs(tx - self.pos[0]) + abs(ty - self.pos[1]) > 2.5:
+            self.pos = [tx, ty]  # a jump (new level, respawn): no slide across the maze
+            return
+        k = 1.0 - math.exp(-dt / NET_SMOOTH_MS) if dt > 0 else 0.0
+        self.pos[0] += (tx - self.pos[0]) * k
+        self.pos[1] += (ty - self.pos[1]) * k
 
 
 def _clear_holly_leg_gap(image: pygame.Surface) -> pygame.Surface:
@@ -1389,7 +1457,7 @@ def _make_cloak_icon() -> pygame.Surface:
 
 class Game:
     def __init__(self, seed: int | None, level: int = 1, character: str = "archie", title: bool = True,
-                 online: bool = True):
+                 online: bool = True, net_port: int = net.GAME_PORT, discovery_port: int = net.DISCOVERY_PORT):
         self.board = Leaderboard(online=online)
         self._reset_score()
         self.char_sets = {}
@@ -1500,6 +1568,28 @@ class Game:
         self.taunt_name = None
         self.taunt_until = -1e9
         self.taunt_last = None
+        # Network game state (all idle in single player).
+        self.net = None              # net.Link while a two-player game is on
+        self.net_role = None         # "host" or "join"
+        self.net_port = net_port
+        self.discovery_port = discovery_port
+        self.other = None            # RemotePlayer
+        self.lobby = None
+        self.beacon = None
+        self.scanner = None
+        self.net_notice = None       # (text, t0)
+        self.net_over = False        # both exterminated: game over for both
+        self.net_first = None        # "host"/"join": who reached this level's TARDIS first
+        self.net_departing = False
+        self.net_card_at = None
+        self.net_next_seed = None
+        self.net_last_now = None
+        self.other_voice_until = -1e9
+        self.watch_blend = 0.0
+        self.safe_cells = frozenset()
+        self.exit_hold = False       # in the TARDIS, waiting for the other player
+        self.exit_release_t = -1e9
+        self.pay_on_exit = True
         self.mode = "title" if title else "play"
         self.title_pick = CHAR_ORDER.index(self.character) if self.character in CHAR_ORDER else 0
         seed0 = seed if seed is not None else (time.time_ns() & 0x7FFFFFFF)
@@ -1524,6 +1614,7 @@ class Game:
         self.level_bonus = 0
         self.spot_bonus = 0          # +SCORE_PER_SPOT per "Exterminate!"
         self.bonus_pop_t0 = None
+        self.bonus_pop_text = f"+{SCORE_PER_SPOT}"
         self.move_grace_until = -1e9
         self.entry_active = False    # typing a name for the leaderboard
         self.entry_done = False
@@ -1547,7 +1638,7 @@ class Game:
 
     def wants_text(self) -> bool:
         """True while a name is being typed (Esc then skips instead of quitting)."""
-        return self.mode == "play" and self.entry_active
+        return (self.mode == "play" and self.entry_active) or self.mode == "lobby"
 
     def _begin_entry(self):
         self.final_score = self.score
@@ -1592,6 +1683,10 @@ class Game:
 
     def _enter_title(self, seed: int | None = None):
         """Decorative maze with TITLE_DALEKS Daleks; no player, no deaths."""
+        self._net_close()
+        self.other = None
+        self.lobby = None
+        self.safe_cells = frozenset()
         self.mode = "title"
         self.level = 1
         self.card_t0 = None
@@ -1723,7 +1818,13 @@ class Game:
         self.daleks = []
         self._hum_from = None
         self._hum_dist = {}
+        self.exit_hold = False
+        self.exit_release_t = -1e9
+        self.pay_on_exit = self.net is None
+        self.safe_cells = self._safe_zone() if self.net is not None else frozenset()
         self._spawn_daleks()
+        if self.net is not None:
+            self._net_after_reset()
 
     # ----- Daleks -------------------------------------------------------
     def _path_dist(self, start):
@@ -1754,6 +1855,7 @@ class Game:
                 and from_exit.get(cell, 0) >= DALEK_MIN_EXIT_DIST * k
                 and self.grid[cell[1]][cell[0]] == PATH
                 and cell not in (self.start_cell, self.demat_cell)
+                and cell not in self.safe_cells
             )
             if len(cands) >= self.num_daleks:
                 break
@@ -1794,19 +1896,31 @@ class Game:
     def archie_exposed(self) -> bool:
         return self.mode == "play" and not (self.disguised or self.dead or self.won)
 
-    def _sees(self, d: Dalek) -> bool:
-        if not self.archie_exposed():
-            return False
+    def _player_cells(self):
+        """[(who, cells, exposed)]: this game's player, plus the other one in
+        a network game. A player who is not exposed (cloaked, or a corpse)
+        blocks a Dalek's way; an exposed one is a target."""
+        players = [("me", self._archie_cells(), self.archie_exposed())]
+        o = self.other
+        if self.net is not None and o is not None and self.mode == "play" and not o.in_tardis:
+            players.append(("other", o.cells(), o.exposed()))
+        return players
+
+    def _sees(self, d: Dalek):
+        """Who Dalek d can see along the corridor it faces: "me", "other" or None."""
+        targets = [(who, cells) for who, cells, exposed in self._player_cells() if exposed]
+        if not targets:
+            return None
         c, r = d.cell()
         dc, dr = d.facing
-        archie = self._archie_cells()
         for k in range(1, DALEK_SIGHT + 1):
             cell = (c + dc * k, r + dr * k)
             if not self.is_open(*cell):
-                return False
-            if cell in archie:
-                return True
-        return False
+                return None
+            for who, cells in targets:
+                if cell in cells:
+                    return who
+        return None
 
     def _choose_next(self, d: Dalek, now: float) -> bool:
         """At a cell centre: pick the next cell. True if it can keep gliding."""
@@ -1814,15 +1928,15 @@ class Game:
         f = d.facing
         back = (-f[0], -f[1])
         others = self._dalek_cells(exclude=d)
-        archie = self._archie_cells()
-        exposed = self.archie_exposed()
+        players = self._player_cells()
         opts = []
         for dirn in DIR_ORDER:
             n = (c + dirn[0], r + dirn[1])
             if (not self.is_open(*n) or n == self.exit_cell or n in others
-                    or (n == self.demat_cell and self.start_tardis_up(now))):
+                    or (n == self.demat_cell and self.start_tardis_up(now))
+                    or n in self.safe_cells):
                 continue
-            if n in archie and not exposed:
+            if any(n in cells and not exposed for _, cells, exposed in players):
                 continue  # a hedge (or a corpse) is in the way: turn away
             opts.append(dirn)
         pool = [o for o in opts if o != back] or [o for o in opts if o == back]
@@ -1832,12 +1946,14 @@ class Game:
         dirn = d.rng.choice(pool)
         n = (c + dirn[0], r + dirn[1])
         turned = d.face(dirn, now)
-        if n in archie:
+        victim = next((who for who, cells, _ in players if n in cells), None)
+        if victim is not None:
             # Bumped into Archie in the open: that counts as seeing him.
             d.state = "aim"
             d.aim_t0 = now
             d.fire_at = now + DALEK_TELEGRAPH_MS + (DALEK_TURN_MS if turned else 0)
-            self._shout(now)
+            d.victim = victim
+            self._shout(now, victim)
             return False
         d.target = n
         if turned:
@@ -1850,18 +1966,21 @@ class Game:
             if d.state == "fire":
                 continue
             if d.state == "aim":
-                if not self._sees(d):
+                who = self._sees(d)
+                if who is None:
                     d.state = "roam"  # lost him (hedge, or he slipped away)
                 elif now >= d.fire_at:
                     d.state = "fire"
                     d.fire_t0 = now
-                    self._kill(now, d)
+                    self._kill(now, d, who)
                 continue
-            if self._sees(d):
+            who = self._sees(d)
+            if who is not None:
                 d.state = "aim"
                 d.aim_t0 = now
                 d.fire_at = now + DALEK_TELEGRAPH_MS
-                self._shout(now)
+                d.victim = who
+                self._shout(now, who)
                 continue
             if now < d.wait_until:
                 continue
@@ -1883,13 +2002,16 @@ class Game:
                         d.pos[1] += math.copysign(move, dy)
                     break
 
-    def _shout(self, now: float):
+    def _shout(self, now: float, victim: str = "me"):
         """'Exterminate!' as the telegraph starts; one voice at a time.
 
         Each shout that is actually voiced is worth SCORE_PER_SPOT. It is only
         called as a Dalek goes from roaming to aiming, and the voice gate means
         two Daleks spotting together (or one re-spotting while it is still
         shouting) is one shout and one bonus."""
+        if victim == "other":
+            self._net_spotted_other(now)
+            return
         if now < self.voice_until:
             return
         self._stop_taunt()  # the real warning always wins over a callout
@@ -1898,8 +2020,12 @@ class Game:
         if self.mode == "play" and not (self.dead or self.won):
             self.spot_bonus += SCORE_PER_SPOT
             self.bonus_pop_t0 = now
+            self.bonus_pop_text = f"+{SCORE_PER_SPOT}"
 
-    def _kill(self, now: float, shooter: Dalek):
+    def _kill(self, now: float, shooter: Dalek, victim: str = "me"):
+        if victim == "other":
+            self._net_kill_other(now, shooter)
+            return
         if self.dead or self.won:
             return
         self._stop_taunt()
@@ -1913,6 +2039,8 @@ class Game:
         self.queued = None
         self.bump_dir = None
         self.disguise_pending = False
+        if self.net is not None:
+            self._net_local_died(now, shooter)
 
     # ----- Hedge disguise ----------------------------------------------
     def toggle_disguise(self, now: float):
@@ -2209,6 +2337,9 @@ class Game:
         return None
 
     def on_key(self, key: int, now: float, text: str = ""):
+        if self.mode == "lobby":
+            self._lobby_key(key, now)
+            return
         if self.wants_text():
             self._entry_key(key, text, now)  # letters (M, H, R ...) are typed, not actions
             return
@@ -2231,6 +2362,8 @@ class Game:
                 self.title_pick = min(1, len(CHAR_ORDER) - 1)
             elif key in RESTART_KEYS:
                 self._start_game(now)
+            elif key == NET_KEY:
+                self.open_lobby(now)
             return
         if key in RESTART_KEYS and self.dead and now - self.death_t0 >= LASER_MS and self.entry_done:
             self._enter_title()  # pick a character again
@@ -2272,7 +2405,9 @@ class Game:
     def update(self, now: float):
         dt = 0.0 if self.last_now is None else max(0.0, min(100.0, now - self.last_now))
         self.last_now = now
-        if self.mode == "title":
+        if self.mode in ("title", "lobby"):
+            if self.mode == "lobby":
+                self._lobby_update(now)
             if self.start_t0 is None:
                 self.start_t0 = now
             if self.title_t0 is None:
@@ -2285,6 +2420,15 @@ class Game:
             self._update_daleks(now, dt)
             self.sfx.stop_hums()
             return
+        if self.net is not None:
+            self._net_update(now, dt)
+        if self.net_card_at is not None and now >= self.net_card_at and self.card_t0 is None:
+            self.net_card_at = None  # exterminated: the card follows the survivor's TARDIS
+            self.card_t0 = now
+            self.card_switched = False
+        target = 1.0 if self.watching(now) else 0.0
+        step = dt / NET_WATCH_PAN_MS
+        self.watch_blend = min(target, self.watch_blend + step) if target > self.watch_blend else max(target, self.watch_blend - step)
         if self.card_t0 is not None:
             t = now - self.card_t0
             if not self.card_switched and t >= CARD_FADE_MS:
@@ -2297,8 +2441,10 @@ class Game:
         if self.won:
             self._stop_taunt()
             self._update_exit(now)
-            self._update_hum(now, dt)
-            return  # Daleks freeze while Archie leaves
+            if not self.exit_hold:
+                self._update_hum(now, dt)
+                return  # Daleks freeze while Archie leaves
+            # Network game: waiting in the TARDIS while the other player plays on.
         if self.start_t0 is None:
             self.start_t0 = now
         if self.demat_t0 is None and now - self.start_t0 >= DEMAT_WAIT_MS:
@@ -2309,7 +2455,8 @@ class Game:
         if not self.dead:
             if self._on_the_move(now):
                 self.survive_ms += dt  # on the move in play only: not the title, card, exit or death
-        elif not self.entry_active and not self.entry_done and now - self.death_t0 >= DEATH_MSG_MS:
+        elif (not self.entry_active and not self.entry_done and now - self.death_t0 >= DEATH_MSG_MS
+              and (self.net is None or self.net_over)):
             self._begin_entry()
         if not self.dead:
             self._update_archie(now)
@@ -2317,7 +2464,10 @@ class Game:
             self.disguise_pending = False
             if now >= self.cooldown_until:
                 self._start_disguise(now)
-        self._update_daleks(now, dt)
+        if self.net_role == "join" and self.net is not None:
+            self._net_ease_daleks(dt)  # the host moves the Daleks
+        else:
+            self._update_daleks(now, dt)
         self._update_hum(now, dt)
         self._update_taunt(now)
 
@@ -2336,6 +2486,9 @@ class Game:
         self.wish = None
         self.bump_dir = None
         self.disguise_pending = False
+        if self.net is not None:
+            self.exit_hold = True  # it waits for the other player
+            self._net_arrived(now)
 
     def _update_exit(self, now: float):
         if self.exit_t0 is None:
@@ -2345,8 +2498,8 @@ class Game:
         if self.exit_steps < 2 and t >= EXIT_WALK_MS * (0.25 + 0.4 * self.exit_steps):
             self.exit_steps += 1
             self.sfx.step()
-        if self.exit_demat_t0 is None and t >= EXIT_DEMAT_AT:
-            self.exit_demat_t0 = self.exit_t0 + EXIT_DEMAT_AT
+        if self.exit_demat_t0 is None and t >= EXIT_DEMAT_AT and not self.exit_hold:
+            self.exit_demat_t0 = max(self.exit_t0 + EXIT_DEMAT_AT, self.exit_release_t)
             self.sfx.play("tardis_demat")
         if (self.exit_demat_t0 is not None and self.card_t0 is None
                 and now - self.exit_demat_t0 >= self.demat_len + EXIT_CARD_GAP_MS):
@@ -2357,8 +2510,11 @@ class Game:
         """Under the black card: the next level gets a brand-new maze."""
         self.card_switched = True
         self.level += 1
-        self.level_bonus += SCORE_PER_LEVEL
-        self.reset(time.time_ns() & 0x7FFFFFFF, banner=False)
+        if self.pay_on_exit:  # (a network game pays the +50 to the first one in, on arrival)
+            self.level_bonus += SCORE_PER_LEVEL
+        seed = self.net_next_seed if self.net_next_seed is not None else time.time_ns()
+        self.net_next_seed = None
+        self.reset(seed & 0x7FFFFFFF, banner=False)
 
     def start_tardis_up(self, now: float) -> bool:
         """The TARDIS that brought Archie still stands on its cell (solid for
@@ -2644,13 +2800,15 @@ class Game:
         self._draw_world(view, now)
         if self.mode == "title":
             self._draw_title(view, now)
+        elif self.mode == "lobby":
+            self._draw_lobby(view, now)
         else:
             self._draw_effects(view, now)
             self._draw_minimap(view)
             self._draw_cloak_hud(view, now)
             self._draw_level_hud(view)
             self._draw_score_hud(view, now)
-            if self.dead and now - self.death_t0 >= DEATH_MSG_MS:
+            if self.dead and now - self.death_t0 >= DEATH_MSG_MS and (self.net is None or self.net_over):
                 who = self.char_name
                 if self.entry_active:
                     self._draw_name_entry(view, now)
@@ -2681,10 +2839,17 @@ class Game:
         vcol, vrow = self.visual_pos(now)
         feet_x, feet_y = tile_origin(vcol, vrow)
         feet_y += TILE_H // 2
+        look_x, look_y = feet_x, feet_y
+        if self.watch_blend > 0.0 and self.other is not None:
+            # Network game: glide over to the player we are watching.
+            ox, oy = tile_origin(*self.other.pos)
+            k = ease(self.watch_blend)
+            look_x += (ox - feet_x) * k
+            look_y += (oy + TILE_H // 2 - feet_y) * k
         # Feet sit near the centre; looking a little above them puts his body
         # just above centre. The maze scrolls; tiles are not yaw-rotated.
-        cam_x = feet_x - self.view_w / 2
-        cam_y = (feet_y - 46) - self.view_h / 2
+        cam_x = look_x - self.view_w / 2
+        cam_y = (look_y - 46) - self.view_h / 2
         self.cam = (cam_x, cam_y)
         tiles = self._visible_tiles(cam_x, cam_y)
 
@@ -2708,6 +2873,9 @@ class Game:
         # On the title screen the player is not in the maze.
         if self.mode == "play":
             entities.append((char_depth, 1, lambda: self._draw_archie(screen, feet_sx, feet_sy, now)))
+        o = self.other
+        if self.mode == "play" and o is not None and not o.in_tardis:
+            entities.append((o.pos[0] + o.pos[1], 1, lambda: self._draw_other(screen, now, cam_x, cam_y)))
         for d in self.daleks:
             entities.append((d.pos[0] + d.pos[1], 0, lambda d=d: self._draw_dalek(screen, d, now, cam_x, cam_y)))
         ec, er = self.exit_cell
@@ -2834,6 +3002,41 @@ class Game:
         if fx < -img_w or fx > self.view_w + img_w or fy < -40 or fy > self.view_h + img_h:
             return
         self._blit_tardis(screen, fx, fy, alpha, lamp)
+
+    def _draw_other(self, screen, now: float, cam_x: float, cam_y: float):
+        """The other player in a network game (their own sprite set)."""
+        o = self.other
+        cs = self.char_sets[o.character]
+        fx, fy = tile_origin(*(o.dead_pos if o.dead else o.pos))
+        fx = int(round(fx - cam_x))
+        fy = int(round(fy + TILE_H // 2 - cam_y))
+        o.feet = (fx, fy)
+        if fx < -80 or fx > self.view_w + 80 or fy < -20 or fy > self.view_h + SPRITE_H + 20:
+            return
+        key = FACING_SPRITE[o.facing]
+        sprite = cs["sprites"][key]
+        ax, ay = cs["anchors"][key]
+        pos = (int(round(fx - ax)), int(round(fy - ay)))
+        if o.dead:
+            t = now - o.death_t0
+            screen.blit(self.scorch, (fx - self.scorch.get_width() // 2, fy - 7))
+            ghosts = cs["white"][key]
+            if t < LASER_MS:
+                screen.blit(ghosts[0] if int(t / 45) % 2 == 0 else sprite, pos)
+            elif t < DEATH_FADE_MS:
+                u = (t - LASER_MS) / (DEATH_FADE_MS - LASER_MS)
+                screen.blit(ghosts[max(0, min(len(ghosts) - 1, int(u * (len(ghosts) - 1) + 0.5)))], pos)
+            return
+        if o.moving:
+            local = (o.u * 2.0) % 1.0 if o.u < 1.0 else 0.0
+            fy -= int(round(math.sin(local * math.pi) * 2))
+            pos = (pos[0], int(round(fy - ay)))
+        if o.disguised:
+            shade = int(round(max(0.0, min(1.0, (fy - TILE_H // 2) / self.view_h)) * (N_HEDGE_SHADES - 1)))
+            self._blit_disguise(screen, fx, fy, DISGUISE_SCALE, shade)
+            return
+        screen.blit(self.shadow, (fx - self.shadow.get_width() // 2, fy - 6))
+        screen.blit(sprite, pos)
 
     def _draw_dalek(self, screen, d: Dalek, now: float, cam_x: float, cam_y: float):
         fx, fy = tile_origin(d.pos[0], d.pos[1])
@@ -2973,6 +3176,12 @@ class Game:
                 gx, gy = self._dalek_point(self.shooter, now, self.dalek_gun)
                 fx, fy = self.archie_feet
                 self._draw_laser(screen, (gx, gy), (fx, fy - 34), now, t)
+        o = self.other
+        if o is not None and o.dead and o.shooter is not None and o.shooter in self.daleks:
+            t = now - o.death_t0
+            if 0 <= t < LASER_MS:
+                gx, gy = self._dalek_point(o.shooter, now, self.dalek_gun)
+                self._draw_laser(screen, (gx, gy), (o.feet[0], o.feet[1] - 34), now, t)
 
     def _draw_shout(self, screen, d: Dalek, now: float):
         fx, fy = d.feet
@@ -3067,6 +3276,11 @@ class Game:
         for d in self.daleks:
             c, r = d.cell()
             pygame.draw.circle(box, (235, 40, 36), (pad + c * scale + 1, pad + r * scale + 1), 2)
+        o = self.other
+        if o is not None and not o.in_tardis:
+            colour = (120, 70, 60) if o.dead else ((255, 150, 210) if o.character == "holly" else (140, 220, 255))
+            ox, oy = int(round(o.pos[0])), int(round(o.pos[1]))
+            pygame.draw.rect(box, colour, (pad + ox * scale, pad + oy * scale, scale, scale))
         px = pad + int(self.col * scale)
         py = pad + int(self.row * scale)
         pygame.draw.rect(box, (255, 248, 230), (px, py, scale, scale))
@@ -3107,12 +3321,20 @@ class Game:
             box.blit(v, (w - pad_x - v.get_width(), y))
         y0 = 8 + self.font_hud.get_height() + 10 + 4  # just under the level box
         screen.blit(_finish_rgba(box), (8, y0))
+        if self.other is not None:
+            o = self.other
+            state = " (in the TARDIS)" if o.in_tardis else (" (exterminated)" if o.dead else "")
+            line = self.font_hud.render(f"{o.name}: {o.score}{state}", True, (230, 214, 180))
+            back = _new_rgba((line.get_width() + 10, line.get_height() + 4))
+            back.fill((36, 24, 16, 160))
+            screen.blit(_finish_rgba(back), (8, y0 + h + 3))
+            screen.blit(line, (13, y0 + h + 5))
         if now is not None and self.bonus_pop_t0 is not None:
             t = (now - self.bonus_pop_t0) / BONUS_POP_MS
             if 0.0 <= t < 1.0:
                 # "+20" beside the Score row: drifts up a few pixels and fades.
                 fade = 1.0 if t < 0.6 else 1.0 - (t - 0.6) / 0.4
-                text = f"+{SCORE_PER_SPOT}"
+                text = self.bonus_pop_text
                 surf = self.font_score.render(text, True, (255, 220, 120))
                 shadow = self.font_score.render(text, True, (20, 12, 6))
                 x = 8 + w + 5
@@ -3169,7 +3391,35 @@ class Game:
         screen.blit(_alpha_scaled(shadow, fade * 0.8), (x + 1, y + 1))
         screen.blit(_alpha_scaled(surf, fade), (x, y))
 
+    def _small_banner(self, screen, text: str, y: int, colour=(255, 236, 170)):
+        surf = self.font_small.render(text, True, colour)
+        back = _new_rgba((surf.get_width() + 16, surf.get_height() + 8))
+        back.fill((20, 12, 6, 190))
+        pygame.draw.rect(back, (186, 160, 96, 220), back.get_rect(), 1)
+        x = (self.view_w - back.get_width()) // 2
+        screen.blit(_finish_rgba(back), (x, y))
+        screen.blit(surf, (x + 8, y + 4))
+
+    def _draw_net_banners(self, screen, now: float):
+        y = self.view_h - 30
+        if self.watching(now):
+            name = self.other.name
+            self._small_banner(screen, f"Watching {name}", y)
+            sub = (f"In the TARDIS - it leaves when {name} gets here" if self.won
+                   else f"If {name} reaches the TARDIS you're both through")
+            t = self.font_hud.render(sub, True, (230, 214, 180))
+            screen.blit(t, ((self.view_w - t.get_width()) // 2, y - 12))
+        elif self.dead and self.net is not None and not self.net_over and self.other is not None:
+            self._small_banner(screen, "EXTERMINATED", y, (255, 96, 72))
+        if self.net_notice is not None:
+            text, t0 = self.net_notice
+            if now - t0 < NET_NOTICE_MS:
+                self._small_banner(screen, text, 64, (255, 140, 110))
+            else:
+                self.net_notice = None
+
     def _draw_banners(self, screen, now: float):
+        self._draw_net_banners(screen, now)
         # "Level N" as a level starts (the card already said it after a level change).
         if self.banner and self.start_t0 is not None and not self.won and not self.dead:
             t = now - self.start_t0
@@ -3211,17 +3461,19 @@ class Game:
             screen.blit(_alpha_scaled(sub, text_fade), ((self.view_w - sub.get_width()) // 2, self.view_h // 2 + 4))
 
     def _draw_panel(self, screen, title_text: str, sub_text: str, title_colour, foot: str | None = None,
-                    extra: list[str] | None = None, pop: tuple[str, float] | None = None):
+                    extra: list[str] | None = None, pop: tuple[str, float] | None = None,
+                    strip_dots: bool = True):
         """Death / message panel. No full stops on any line. `pop` is a gold
         (text, t 0..1) that drifts up and fades beside the first extra line."""
-        title_text = title_text.replace(".", "")
-        sub_text = sub_text.replace(".", "")
+        dot = "" if strip_dots else "."
+        title_text = title_text.replace(".", dot)
+        sub_text = sub_text.replace(".", dot)
         if foot:
-            foot = foot.replace(".", "")
+            foot = foot.replace(".", dot)
         title = self.font_big.render(title_text, True, title_colour)
         sub = self.font_small.render(sub_text, True, (232, 214, 170))
         foot_s = self.font_small.render(foot, True, (232, 214, 170)) if foot else None
-        extra_s = [self.font_score.render(e.replace(".", ""), True, (255, 236, 170) if i == 0 else (200, 180, 140))
+        extra_s = [self.font_score.render(e.replace(".", dot), True, (255, 236, 170) if i == 0 else (200, 180, 140))
                    for i, e in enumerate(extra or [])]
         gap = 8
         lines = [title, sub] + extra_s + ([foot_s] if foot_s else [])
@@ -3248,6 +3500,477 @@ class Game:
         panel = _finish_rgba(panel)
         screen.blit(panel, ((self.view_w - width) // 2, (self.view_h - height) // 2))
 
+
+    # ----- Two players on a local network -----------------------------------
+    # The host runs the maze, the Daleks and the TARDIS rules; the joiner moves
+    # its own player at once and mirrors everything else. Transport: net.py.
+    def open_lobby(self, now: float | None = None, stage: str = "menu", addr=None):
+        """Network lobby over the title maze: Host or Join."""
+        self._net_close()
+        self.mode = "lobby"
+        self.lobby = {"stage": "menu", "pick": 0, "char": self.title_pick, "hosts": [], "sel": 0,
+                      "msg": "", "t0": time.monotonic()}
+        if stage == "host":
+            self._lobby_host()
+        elif stage == "scan":
+            self._lobby_scan()
+        elif stage == "join" and addr is not None:
+            self._lobby_join(addr)
+
+    def _lobby_host(self):
+        lb = self.lobby
+        try:
+            self.net = net.Link("host", port=self.net_port)
+        except OSError as exc:
+            lb["stage"], lb["msg"] = "menu", f"Can't use UDP port {self.net_port}: {exc.strerror or exc}"
+            return
+        self.net_role = "host"
+        char = CHAR_ORDER[lb["char"]]
+        self.beacon = net.Beacon({"name": net.host_label(), "char": char, "level": 1,
+                                  "port": self.net.port, "ip": net.local_ip()}, port=self.discovery_port)
+        lb["stage"], lb["msg"] = "hosting", ""
+
+    def _lobby_scan(self):
+        lb = self.lobby
+        if self.scanner is not None:
+            self.scanner.close()
+        self.scanner = net.Scanner(port=self.discovery_port)
+        lb["stage"], lb["hosts"], lb["sel"] = "scanning", [], 0
+        lb["msg"] = self.scanner.error or ""
+
+    def _lobby_join(self, addr):
+        lb = self.lobby
+        self._net_close()
+        try:
+            self.net = net.Link("join", port=0, peer=tuple(addr))
+        except OSError as exc:
+            lb["stage"], lb["msg"] = "menu", f"Network error: {exc.strerror or exc}"
+            return
+        self.net_role = "join"
+        self.net.send_event("hello", v=net.PROTOCOL, name=net.host_label())
+        lb["stage"], lb["addr"], lb["t0"], lb["msg"] = "joining", tuple(addr), time.monotonic(), ""
+
+    def _lobby_key(self, key: int, now: float):
+        lb = self.lobby
+        stage = lb["stage"]
+        if key == pygame.K_ESCAPE:
+            if stage == "menu":
+                self._enter_title(self.seed)
+            else:
+                self._net_close()
+                lb["stage"], lb["msg"] = "menu", ""
+            return
+        if stage == "menu":
+            if key in (pygame.K_UP, pygame.K_w, pygame.K_DOWN, pygame.K_s):
+                lb["pick"] = 1 - lb["pick"]
+            elif key in (pygame.K_LEFT, pygame.K_a, pygame.K_RIGHT, pygame.K_d):
+                lb["char"] = 1 - lb["char"]
+            elif key in (pygame.K_1, pygame.K_KP1):
+                lb["char"] = 0
+            elif key in (pygame.K_2, pygame.K_KP2):
+                lb["char"] = 1
+            elif key in RESTART_KEYS:
+                self._lobby_host() if lb["pick"] == 0 else self._lobby_scan()
+        elif stage == "scanning":
+            hosts = lb["hosts"]
+            if key in (pygame.K_UP, pygame.K_w) and hosts:
+                lb["sel"] = (lb["sel"] - 1) % len(hosts)
+            elif key in (pygame.K_DOWN, pygame.K_s) and hosts:
+                lb["sel"] = (lb["sel"] + 1) % len(hosts)
+            elif key == pygame.K_r:
+                self._lobby_scan()
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE) and hosts:
+                self._lobby_join(hosts[lb["sel"]][0])
+
+    def _lobby_update(self, now: float):
+        lb = self.lobby
+        if lb is None:
+            return
+        stage = lb["stage"]
+        if stage == "hosting":
+            self.beacon.tick(char=CHAR_ORDER[lb["char"]])
+            self.net.poll()
+            for kind, data in self.net.take_events():
+                if kind == "hello" and data.get("v") == net.PROTOCOL:
+                    mine = CHAR_ORDER[lb["char"]]
+                    theirs = CHAR_ORDER[1 - lb["char"]]
+                    seed = time.time_ns() & 0x7FFFFFFF
+                    self.net.send_event("start", seed=seed, level=1, host=mine, join=theirs)
+                    self._net_start_play(seed, 1, mine, theirs, now)
+                    return
+        elif stage == "scanning":
+            sc = self.scanner
+            if sc is not None:
+                sc.poll()
+                lb["hosts"] = sc.hosts()
+                if lb["sel"] >= len(lb["hosts"]):
+                    lb["sel"] = 0
+                if sc.done():
+                    sc.close()
+                    self.scanner = None
+        elif stage == "joining":
+            self.net.poll()
+            for kind, data in self.net.take_events():
+                if kind == "start":
+                    self._net_start_play(int(data["seed"]), int(data.get("level", 1)),
+                                         data["join"], data["host"], now)
+                    return
+            if time.monotonic() - lb["t0"] > NET_JOIN_WAIT_S:
+                self._net_close()
+                lb["stage"], lb["msg"] = "menu", "No answer from that game"
+
+    def _draw_lobby(self, screen, now: float):
+        veil = _new_rgba((self.view_w, self.view_h))
+        veil.fill((10, 6, 4, 150))
+        screen.blit(_finish_rgba(veil), (0, 0))
+        title = self.font_title.render("Daleks in Hedges", True, (255, 236, 170))
+        screen.blit(self.font_title.render("Daleks in Hedges", True, (20, 12, 6)), ((self.view_w - title.get_width()) // 2 + 1, 8))
+        screen.blit(title, ((self.view_w - title.get_width()) // 2, 7))
+        lb = self.lobby
+        stage = lb["stage"]
+        char = self.char_sets[CHAR_ORDER[lb["char"]]]["name"]
+        other = self.char_sets[CHAR_ORDER[1 - lb["char"]]]["name"]
+        mark = lambda on, text: f"> {text} <" if on else text
+        if stage == "menu":
+            extra = [mark(lb["pick"] == 0, f"Host a game as {char}"), mark(lb["pick"] == 1, "Join a game on this network")]
+            if lb["msg"]:
+                extra.append(lb["msg"])
+            if lb["pick"] == 1:
+                extra[0], extra[1] = extra[1], extra[0]  # the chosen line is the bright one
+            self._draw_panel(screen, "Two Players", "Up/Down: host or join    Left/Right: Archie or Holly",
+                             (255, 220, 120), foot="Enter to choose    Esc back", extra=extra, strip_dots=False)
+        elif stage == "hosting":
+            addr = f"{net.local_ip()}  UDP {self.net.port}"
+            self._draw_panel(screen, "Hosting", f"Waiting for a player to join{'.' * (int(now / 400) % 4)}",
+                             (255, 220, 120), foot="Esc to cancel",
+                             extra=[f"You are {char}, they will be {other}", addr], strip_dots=False)
+        elif stage == "scanning":
+            hosts = lb["hosts"]
+            lines = []
+            for i, ((ip, port), info) in enumerate(hosts):
+                who = CHARACTERS.get(info.get("char"), {}).get("name", "?")
+                lines.append(mark(i == lb["sel"], f"{info.get('name', ip)} as {who}  {ip}"))
+            if lines:
+                lines.insert(0, lines.pop(lb["sel"]))
+            searching = self.scanner is not None
+            sub = "Looking for games" + "." * (int(now / 400) % 4) if searching else f"Found {len(hosts)} game{'s' if len(hosts) != 1 else ''}"
+            if not lines:
+                lines = [lb["msg"] or ("" if searching else "No games found - is the host waiting?")]
+            self._draw_panel(screen, "Join a Game", sub, (255, 220, 120),
+                             foot="Enter join    R search again    Esc back", extra=[l for l in lines if l] or None, strip_dots=False)
+        elif stage == "joining":
+            ip, port = lb["addr"]
+            self._draw_panel(screen, "Joining", f"Contacting {ip} on UDP {port}", (255, 220, 120), foot="Esc to cancel", strip_dots=False)
+
+    def _net_close(self):
+        for attr in ("net", "beacon", "scanner"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                obj.close()
+            setattr(self, attr, None)
+        self.net_role = None
+
+    def _net_start_play(self, seed: int, level: int, mine: str, theirs: str, now: float):
+        if self.beacon is not None:
+            self.beacon.close()
+            self.beacon = None
+        if self.scanner is not None:
+            self.scanner.close()
+            self.scanner = None
+        self.lobby = None
+        self.sfx.stop_title_theme()
+        self._apply_character(mine)
+        self.title_pick = CHAR_ORDER.index(mine)
+        self.other = RemotePlayer(theirs, self.char_sets[theirs]["name"])
+        self.mode = "play"
+        self.level = level
+        self.net_over = False
+        self.net_notice = None
+        self.watch_blend = 0.0
+        self._reset_score()
+        self.reset(seed, banner=True)
+        self.start_t0 = now
+        self.last_now = now
+        self.net_last_now = now
+
+    def _safe_zone(self):
+        dist = self._path_dist(self.demat_cell)
+        return frozenset(c for c, d in dist.items() if d <= NET_SAFE_RADIUS)
+
+    def _net_after_reset(self):
+        """Both players start by the TARDIS that brought them: the host on the
+        usual cell, the joiner one cell further in."""
+        self.net_departing = False
+        self.net_card_at = None
+        self.net_first = None
+        sc = self.start_cell
+        nxt = [(sc[0] + d[0], sc[1] + d[1], d) for d in DIR_ORDER
+               if self.is_open(sc[0] + d[0], sc[1] + d[1]) and (sc[0] + d[0], sc[1] + d[1]) != self.demat_cell]
+        second, second_dir = ((nxt[0][0], nxt[0][1]), nxt[0][2]) if nxt else (sc, self.facing)
+        if self.net_role == "join":
+            self._place_archie(second, second_dir)
+            self.dead_pos = (float(second[0]), float(second[1]))
+            if self.other is not None:
+                self.other.reset(sc, (sc[0] - self.demat_cell[0], sc[1] - self.demat_cell[1]))
+        elif self.other is not None:
+            self.other.reset(second, second_dir)
+
+    def watching(self, now: float) -> bool:
+        """Out of it (exterminated, or waiting in the TARDIS) with the other
+        player still going: the camera follows them."""
+        o = self.other
+        if self.mode != "play" or self.net is None or o is None or o.dead or o.in_tardis:
+            return False
+        if self.dead:
+            return now - self.death_t0 >= DEATH_MSG_MS
+        return self.won and self.exit_hold and self.exit_walk_u(now) >= 1.0
+
+    # Messages ---------------------------------------------------------------
+    def _net_state(self, now: float) -> dict:
+        st = {"lv": self.level, "c": [self.col, self.row], "s": list(self.src), "d": list(self.dst),
+              "m": int(self.moving), "u": round(self._step_u(now), 3) if self.moving else 0,
+              "f": self.facing_index, "k": int(self.disguised), "x": int(self.dead), "w": int(self.won),
+              "p": self.score, "ch": self.character}
+        if self.net_role == "host":
+            st["fst"] = self.net_first
+            st["dk"] = [[round(d.pos[0], 3), round(d.pos[1], 3), d.target[0], d.target[1],
+                         DIR_ORDER.index(d.facing), DALEK_STATES.index(d.state), int(d.gliding(now))]
+                        for d in self.daleks]
+        return st
+
+    def _net_update(self, now: float, dt: float):
+        link = self.net
+        link.poll()
+        for kind, data in link.take_events():
+            self._net_event(kind, data, now)
+            if self.net is None:
+                return
+        if link.state_fresh:
+            link.state_fresh = False
+            self._net_apply_state(link.state or {}, now)
+        if self.other is not None:
+            self.other.ease_towards(dt)
+        if link.state_due():
+            link.send_state(self._net_state(now))
+        if link.lost() and not self.net_over:
+            self._net_drop(now)
+            return
+        if self.net_role == "host":
+            self._net_check_depart(now)
+
+    def _net_apply_state(self, st: dict, now: float):
+        o = self.other
+        if o is None:
+            return
+        o.score = int(st.get("p", o.score))
+        if st.get("lv") != self.level or self.card_t0 is not None:
+            return  # from the other side of a level change
+        cell = tuple(st.get("c", o.cell))
+        if self.net_role == "host" and cell != o.cell and not self._net_legal(o.cell, cell):
+            return  # not a move a player could make (through a hedge): keep the last good one
+        o.cell = cell
+        o.src, o.dst = tuple(st.get("s", cell)), tuple(st.get("d", cell))
+        moving = bool(st.get("m"))
+        if moving and (not o.moving or o.dst != tuple(st.get("d", cell))):
+            o.u = float(st.get("u", 0.0))
+        elif moving:
+            o.u = max(o.u, float(st.get("u", 0.0)))
+        o.moving = moving
+        o.facing = DIR_ORDER[int(st.get("f", 0)) % 4]
+        if bool(st.get("k")) and not o.disguised:
+            o.disguise_t0 = now
+        o.disguised = bool(st.get("k"))
+        if self.net_role == "join":
+            self.net_first = st.get("fst")
+            if "dk" in st:
+                self._net_mirror_daleks(st["dk"], now)
+
+    def _net_legal(self, a, b) -> bool:
+        """b is open and reachable from a in a few steps (a packet or two lost)."""
+        if not self.is_open(*b):
+            return False
+        frontier, seen = [tuple(a)], {tuple(a)}
+        for _ in range(3):
+            nxt = []
+            for c, r in frontier:
+                for dc, dr in DIR_ORDER:
+                    n = (c + dc, r + dr)
+                    if n == b:
+                        return True
+                    if n not in seen and self.is_open(*n):
+                        seen.add(n)
+                        nxt.append(n)
+            frontier = nxt
+        return False
+
+    def _net_mirror_daleks(self, rows, now: float):
+        if len(rows) != len(self.daleks):
+            self.daleks = [Dalek(int(round(r[0])), int(round(r[1])), DIR_ORDER[r[4] % 4], random.Random(i))
+                           for i, r in enumerate(rows)]
+        for d, (x, y, tx, ty, f, st, glide) in zip(self.daleks, rows):
+            d.net_pos = (x, y)
+            if abs(x - d.pos[0]) + abs(y - d.pos[1]) > 1.5:
+                d.pos = [x, y]
+            d.target = (tx, ty)
+            d.face(DIR_ORDER[f % 4], now)
+            state = DALEK_STATES[st % 3]
+            if state != d.state:
+                if state == "aim":
+                    d.aim_t0 = now
+                    d.fire_at = now + DALEK_TELEGRAPH_MS
+                elif state == "fire":
+                    d.fire_t0 = now
+                d.state = state
+            d.wait_until = 0.0 if glide else now + 1e6
+
+    def _net_ease_daleks(self, dt: float):
+        k = 1.0 - math.exp(-dt / NET_SMOOTH_MS) if dt > 0 else 0.0
+        for d in self.daleks:
+            if d.net_pos is not None:
+                d.pos[0] += (d.net_pos[0] - d.pos[0]) * k
+                d.pos[1] += (d.net_pos[1] - d.pos[1]) * k
+
+    def _net_event(self, kind: str, data: dict, now: float):
+        o = self.other
+        if kind == "spot":         # (joiner) a Dalek shouted at me
+            self._stop_taunt()
+            if now >= self.voice_until:
+                self.voice_until = now + self.sfx.length_ms("exterminate", 1600.0)
+                self.sfx.play("exterminate")
+            if not (self.dead or self.won):
+                self.spot_bonus += SCORE_PER_SPOT
+                self.bonus_pop_t0 = now
+                self.bonus_pop_text = f"+{SCORE_PER_SPOT}"
+        elif kind == "kill":       # (joiner) the host's Dalek got me
+            i = int(data.get("d", -1))
+            shooter = self.daleks[i] if 0 <= i < len(self.daleks) else None
+            if shooter is not None:
+                shooter.state, shooter.fire_t0 = "fire", now
+            self._kill(now, shooter)
+        elif kind == "died" and o is not None:      # the other player was exterminated
+            i = int(data.get("d", -1))
+            self._net_other_down(now, self.daleks[i] if 0 <= i < len(self.daleks) else None)
+        elif kind == "tardis" and o is not None:    # (host) the joiner stepped into the TARDIS
+            o.dead = False
+            o.in_tardis = True
+            self._net_arrival("join", now)
+        elif kind == "bonus":      # (joiner) first into the TARDIS
+            self._net_bonus(now)
+        elif kind == "first":      # (joiner) the host got there first
+            self.net_first = data.get("who")
+            if o is not None and data.get("who") == "host":
+                o.in_tardis = True
+        elif kind == "level":
+            self.net_next_seed = int(data["seed"])
+            self._net_depart(now)
+        elif kind == "gameover":
+            self.net_over = True
+
+    # Rules (host) -------------------------------------------------------------
+    def _net_spotted_other(self, now: float):
+        """A host Dalek shouted at the joiner: their +20, one voice at a time."""
+        if now < self.other_voice_until:
+            return
+        self.other_voice_until = now + self.sfx.length_ms("exterminate", 1600.0)
+        self.net.send_event("spot")
+        if now >= self.voice_until:
+            self._stop_taunt()
+            self.voice_until = self.other_voice_until
+            self.sfx.play("exterminate")
+
+    def _net_kill_other(self, now: float, shooter: Dalek):
+        o = self.other
+        if o is None or o.dead or o.in_tardis or self.net is None:
+            return
+        self.sfx.play("laser")
+        self.net.send_event("kill", d=self.daleks.index(shooter) if shooter in self.daleks else -1)
+        self._net_other_down(now, shooter)
+
+    def _net_other_down(self, now: float, shooter):
+        o = self.other
+        o.dead = True
+        o.death_t0 = now
+        o.shooter = shooter
+        o.moving = False
+        o.disguised = False
+        o.dead_pos = tuple(o.pos)
+
+    def _net_local_died(self, now: float, shooter):
+        if self.net_role == "host":
+            self.net.send_event("died", d=self.daleks.index(shooter) if shooter in self.daleks else -1)
+
+    def _net_arrived(self, now: float):
+        if self.net_role == "host":
+            self._net_arrival("host", now)
+        else:
+            self.net.send_event("tardis")
+
+    def _net_arrival(self, who: str, now: float):
+        if self.net_first is not None:
+            return  # second one in: no +50
+        self.net_first = who
+        if who == "host":
+            self._net_bonus(now)
+            if self.net is not None:
+                self.net.send_event("first", who="host")
+        elif self.net is not None:
+            self.net.send_event("bonus")
+
+    def _net_bonus(self, now: float):
+        self.level_bonus += SCORE_PER_LEVEL
+        self.bonus_pop_t0 = now
+        self.bonus_pop_text = f"+{SCORE_PER_LEVEL}"
+
+    def _net_check_depart(self, now: float):
+        o = self.other
+        if o is None or self.net_departing or self.net_over or self.card_t0 is not None:
+            return
+        if self.dead and o.dead:
+            self.net_over = True
+            self.net.send_event("gameover")
+            return
+        me_out = self.won or self.dead
+        other_out = o.in_tardis or o.dead
+        if (self.won or o.in_tardis) and me_out and other_out:
+            seed = time.time_ns() & 0x7FFFFFFF
+            self.net.send_event("level", seed=seed, level=self.level + 1)
+            self.net_next_seed = seed
+            self._net_depart(now)
+
+    def _net_depart(self, now: float):
+        """Both are through (or one is through and the other was exterminated):
+        the TARDIS goes, and everyone moves on to the next level."""
+        if self.net_departing:
+            return
+        self.net_departing = True
+        if self.won:
+            self.exit_hold = False
+            self.exit_release_t = now
+        else:  # exterminated: fade out as the survivor's TARDIS goes
+            self.net_card_at = now + EXIT_DEMAT_AT + self.demat_len + EXIT_CARD_GAP_MS
+
+    def _net_drop(self, now: float):
+        """No packets for a while: carry on alone."""
+        first = self.net_first
+        self._net_close()
+        self.other = None
+        self.net_notice = ("Connection lost - playing on alone", now)
+        self.pay_on_exit = first is None
+        self.safe_cells = frozenset()
+        for d in self.daleks:  # the joiner takes over its mirrored Daleks
+            if d.net_pos is not None:
+                d.pos = [d.net_pos[0], d.net_pos[1]]
+                d.net_pos = None
+            if d.wait_until > now + 1000:
+                d.wait_until = now
+            if d.state != "roam":
+                d.state = "roam"
+        if self.exit_hold:
+            self.exit_hold = False
+            self.exit_release_t = now
+        if self.dead:
+            self.net_card_at = None  # nobody left to carry on: game over
+            self.net_next_seed = None
 
     def _title_char_select_bounds(self):
         """Top, bottom and vertical centre of the character-choice block.
@@ -3393,7 +4116,7 @@ class Game:
         mute = "M unmute" if self.sfx.muted else "M mute"
         lines = [
             "Left/Right or A/D (or 1/2): choose character",
-            "Enter / Space: start",
+            "Enter / Space: start    N: two players on a network",
             "In game: Left/Right turn, Up/Down step, H Chameleon Cloak, " + mute,
         ]
         # Copyright at the very bottom (wrapped); controls sit just above it.
@@ -3428,7 +4151,50 @@ def parse_args(argv):
     parser.add_argument("--demo-scores", action="store_true",
                         help="debug: fill the Top 10 with sample names (shown only, never sent)")
     parser.add_argument("--offline", action="store_true", help="never contact the online leaderboard")
+    parser.add_argument("--host", action="store_true",
+                        help="network: host a two-player game straight away (as --character)")
+    parser.add_argument("--join", type=str, default=None, metavar="HOST[:PORT]",
+                        help="network: join the game hosted at this address, skipping discovery")
+    parser.add_argument("--net-port", type=int, default=net.GAME_PORT,
+                        help=f"network: UDP game port to host on, or to join (default {net.GAME_PORT})")
+    parser.add_argument("--discovery-port", type=int, default=net.DISCOVERY_PORT, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
+
+
+def _run_net_headless(game: Game, screen, args) -> int:
+    """Test run of a network game without a screen: real time (the other copy
+    is another process), the player wanders like --frames, and a JSON summary
+    is printed at the end."""
+    frames = args.frames or 600
+    t0 = time.monotonic()
+    started = None
+    for i in range(frames):
+        now = (time.monotonic() - t0) * 1000.0
+        if game.mode == "play":
+            started = started if started is not None else i
+            game.nudge(now)
+        game.update(now)
+        pygame.event.pump()
+        if game.mode == "lobby" and game.lobby and game.lobby["stage"] == "menu":
+            break  # could not connect
+        time.sleep(max(0.0, (i + 1) / 60.0 - (time.monotonic() - t0)))
+    now = (time.monotonic() - t0) * 1000.0
+    game.draw(screen, now)
+    if args.screenshot:
+        pygame.image.save(screen, args.screenshot)
+    o = game.other
+    summary = {
+        "role": game.net_role, "mode": game.mode, "seed": game.seed, "level": game.level,
+        "me": [game.col, game.row], "score": game.score, "dead": game.dead,
+        "other": None if o is None else {"cell": list(o.cell), "score": o.score, "dead": o.dead},
+        "daleks": [[round(d.pos[0], 2), round(d.pos[1], 2)] for d in game.daleks],
+        "stats": game.net.stats if game.net else None,
+        "lobby_msg": game.lobby["msg"] if game.lobby else None,
+    }
+    print("NETSUMMARY " + json.dumps(summary), flush=True)
+    game._net_close()
+    pygame.quit()
+    return 0
 
 
 def main(argv=None):
@@ -3445,8 +4211,20 @@ def main(argv=None):
         skip_title = False
     headless = args.screenshot is not None or args.frames is not None or args.scene is not None
     # Headless test runs never touch the network or the player's score file.
+    netplay = args.host or args.join is not None
+    if netplay:
+        skip_title = False
     game = Game(args.seed, args.level, character=args.character, title=not skip_title,
-                online=not (headless or args.offline))
+                online=not (headless or args.offline), net_port=args.net_port,
+                discovery_port=args.discovery_port)
+    if netplay:
+        game.title_pick = CHAR_ORDER.index(args.character)
+        if args.host:
+            game.open_lobby(stage="host")
+        else:
+            game.open_lobby(stage="join", addr=net.parse_hostport(args.join, args.net_port))
+        if headless:
+            return _run_net_headless(game, screen, args)
     if args.demo_scores:
         game.board.entries = [("Holly", 1460), ("Archie", 1215), ("Dad", 980), ("Nathan", 744),
                               ("Rose", 610), ("Clara", 502), ("Amy", 388), ("Rory", 251),
