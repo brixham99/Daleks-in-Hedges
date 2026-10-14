@@ -67,6 +67,8 @@ Some Wi-Fi networks (guest, school or office networks) block broadcasts, so the 
 
 When you are exterminated, type a name (up to 8 letters, digits or spaces) and press Enter to post it, or Esc to skip. The online Top 10 keeps one best score per name: <http://dreamlo.com/lb/6ac7b3018f40bc15a8400bbc/json>
 
+When you post a score, the game looks up your country (from ipinfo.io, or ipapi.co if that fails) and the Top 10 shows its flag, downloaded once from flagcdn.com into `~/.daleks_in_hedges/flags/`. Older scores have no flag.
+
 Offline, the game shows the last cached Top 10 and sends unsent scores later. The cache, your last name and your best score are in `~/.daleks_in_hedges/scores.json`.
 
 Note: the free [dreamlo](http://dreamlo.com) tier keeps the private code in the client, so anyone reading `game.py` could post or clear scores. Fine for a family game.

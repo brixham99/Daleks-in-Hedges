@@ -247,6 +247,11 @@ DREAMLO_PRIVATE = "ywhrA7pmp0ivMlVZTqZoTwfNbQztSs2kSLvG6ZGQ53OQ"
 DREAMLO_URL = "http://dreamlo.com/lb/"
 DREAMLO_TIMEOUT = 4.0        # seconds; every request runs on a background thread
 SAVE_DIR = os.path.join(os.path.expanduser("~"), ".daleks_in_hedges")
+FLAG_DIR = os.path.join(SAVE_DIR, "flags")  # flag images, downloaded once each
+COUNTRY_URLS = ("https://ipinfo.io/country", "https://ipapi.co/country/")  # no key; first that answers
+COUNTRY_TIMEOUT = 2.0
+FLAG_URL = "https://flagcdn.com/w20/{code}.png"  # 20x10 PNG: one low-res row tall
+FLAG_TIMEOUT = 3.0
 SAVE_FILE = os.path.join(SAVE_DIR, "scores.json")  # last name, local best, cached Top 10, unsent scores
 
 # Two players on a local network (see net.py for the transport).
@@ -1039,6 +1044,88 @@ class Sounds:
             self.start_title_theme()
 
 
+def clean_country(text) -> str:
+    """A 2-letter ISO country code ("GB"), or "" for anything else."""
+    text = str(text or "").strip().upper()
+    return text if len(text) == 2 and text.isascii() and text.isalpha() else ""
+
+
+def lookup_country() -> str:
+    """This player's country from a free HTTPS lookup (blocking: call it on a
+    background thread). "" if every service fails."""
+    for url in COUNTRY_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "DaleksInHedges/1.0"})
+            with urllib.request.urlopen(req, timeout=COUNTRY_TIMEOUT) as resp:
+                code = clean_country(resp.read(64).decode("ascii", "replace"))
+            if code:
+                return code
+        except Exception:
+            continue
+    return ""
+
+
+class Flags:
+    """Small flag images for the Top 10, fetched from flagcdn.com on a
+    background thread and kept in FLAG_DIR, so each is downloaded once."""
+
+    def __init__(self, folder: str = FLAG_DIR, download: bool = True):
+        self.folder = folder
+        self.download = download
+        self.images = {}       # code -> Surface (or None: not available)
+        self.fetching = set()  # codes being downloaded or already tried
+        self.lock = threading.Lock()
+
+    def _path(self, code: str) -> str:
+        return os.path.join(self.folder, code.lower() + ".png")
+
+    def _fetch(self, code: str):
+        try:
+            req = urllib.request.Request(FLAG_URL.format(code=code.lower()),
+                                         headers={"User-Agent": "DaleksInHedges/1.0"})
+            with urllib.request.urlopen(req, timeout=FLAG_TIMEOUT) as resp:
+                data = resp.read(65536)
+            if data[:8] != b"\x89PNG\r\n\x1a\n":
+                return
+            os.makedirs(self.folder, exist_ok=True)
+            tmp = self._path(code) + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, self._path(code))
+        except Exception:
+            pass
+        finally:
+            with self.lock:
+                self.images.pop(code, None)  # look on disk again next frame
+
+    def get(self, code: str):
+        """The flag for code (about 10 px tall), or None for now."""
+        code = clean_country(code)
+        if not code:
+            return None
+        with self.lock:
+            if code in self.images:
+                return self.images[code]
+        img = None
+        path = self._path(code)
+        if os.path.exists(path):
+            try:
+                raw = pygame.image.load(path)
+                h = 10
+                w = max(1, int(round(raw.get_width() * h / raw.get_height())))
+                img = pygame.transform.scale(raw, (w, h)).convert()  # nearest: keeps the pixel look
+            except Exception:
+                img = None
+        with self.lock:
+            self.images[code] = img
+            start = img is None and self.download and code not in self.fetching
+            if start:
+                self.fetching.add(code)
+        if start:
+            threading.Thread(target=self._fetch, args=(code,), daemon=True).start()
+        return img
+
+
 def clean_name(text: str) -> str:
     """Letters, digits and single spaces only, at most NAME_MAX characters."""
     out = "".join(ch for ch in str(text) if ch.isascii() and (ch.isalnum() or ch == " "))
@@ -1055,7 +1142,9 @@ class Leaderboard:
         self.path = path
         self.lock = threading.Lock()
         self.save_lock = threading.Lock()
-        self.entries = []          # [(name, score)], best first
+        self.entries = []          # [(name, score, country)], best first
+        self.country = None        # this player's country code ("" unknown), looked up once a session
+        self.saved_country = ""
         self.pending = []          # [(name, score)] still to send
         self.local_best = 0
         self.last_name = ""
@@ -1070,7 +1159,9 @@ class Leaderboard:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self.entries = [(clean_name(n), int(v)) for n, v in data.get("top", [])][:TOP_N]
+            self.entries = [(clean_name(e[0]), int(e[1]), clean_country(e[2] if len(e) > 2 else ""))
+                            for e in data.get("top", [])][:TOP_N]
+            self.saved_country = clean_country(data.get("country", ""))
             self.pending = [(clean_name(n), int(v)) for n, v in data.get("pending", [])]
             self.local_best = int(data.get("local_best", 0))
             self.last_name = clean_name(data.get("last_name", ""))
@@ -1082,7 +1173,8 @@ class Leaderboard:
             return  # headless test runs leave the player's file alone
         with self.lock:
             data = {"top": self.entries, "pending": self.pending,
-                    "local_best": self.local_best, "last_name": self.last_name}
+                    "local_best": self.local_best, "last_name": self.last_name,
+                    "country": self.country or self.saved_country}
         with self.save_lock:
             try:
                 os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -1095,13 +1187,17 @@ class Leaderboard:
 
     # ----- what the game shows ----------------------------------------
     def top(self, n: int = TOP_N):
-        """Cached dreamlo Top 10 merged with unsent scores (best per name)."""
+        """Cached dreamlo Top 10 merged with unsent scores (best per name):
+        [(name, score, country)]."""
         with self.lock:
+            mine = self.country or self.saved_country
             best = {}
-            for name, score in list(self.entries) + list(self.pending):
-                if name and score > best.get(name, -1):
-                    best[name] = score
-        return sorted(best.items(), key=lambda e: (-e[1], e[0]))[:n]
+            rows = [(e[0], e[1], e[2] if len(e) > 2 else "") for e in self.entries]
+            rows += [(name, score, mine) for name, score in self.pending]
+            for name, score, country in rows:
+                if name and score > best.get(name, (-1, ""))[0]:
+                    best[name] = (score, country)
+        return sorted(((k, v[0], v[1]) for k, v in best.items()), key=lambda e: (-e[1], e[0]))[:n]
 
     def high_score(self) -> int:
         top = self.top(1)
@@ -1128,7 +1224,8 @@ class Leaderboard:
         out = []
         for e in entry:
             try:
-                out.append((clean_name(e.get("name", "")), int(float(e.get("score", 0)))))
+                out.append((clean_name(e.get("name", "")), int(float(e.get("score", 0))),
+                            clean_country(e.get("text", ""))))  # older entries have no code
             except (TypeError, ValueError):
                 continue
         out = [e for e in out if e[0]]
@@ -1136,14 +1233,23 @@ class Leaderboard:
         return out[:TOP_N]
 
     def _send(self, name: str, score: int) -> bool:
+        # /add/name/score/seconds/text: the country code rides in the text field.
         url = (DREAMLO_URL + DREAMLO_PRIVATE + "/add/"
                + urllib.parse.quote(name, safe="") + "/" + str(int(score)))
+        country = self.country or ""
+        if country:
+            url += "/0/" + country
         return self._get(url).strip().startswith("OK")
 
     def _work(self):
         try:
             with self.lock:
                 todo = list(self.pending)
+                need_country = bool(todo) and self.country is None
+            if need_country:
+                code = lookup_country()  # once a session, on this background thread
+                with self.lock:
+                    self.country = code
             sent = []
             for item in todo:
                 try:
@@ -1459,6 +1565,7 @@ class Game:
     def __init__(self, seed: int | None, level: int = 1, character: str = "archie", title: bool = True,
                  online: bool = True, net_port: int = net.GAME_PORT, discovery_port: int = net.DISCOVERY_PORT):
         self.board = Leaderboard(online=online)
+        self.flags = Flags(download=online)
         self._reset_score()
         self.char_sets = {}
         for cid, info in CHARACTERS.items():
@@ -3354,10 +3461,11 @@ class Game:
             lines.append(self.font_score.render("New high score!", True, (255, 220, 120)))
         prompt = self.font_small.render(f"Enter your name (up to {NAME_MAX} letters)", True, cream)
         foot = self.font_small.render("Enter to submit    Esc to skip", True, (200, 180, 140))
+        note = self.font_hud.render("Your country's flag is shown next to your score", True, (170, 152, 118))
         sample = self.font_entry.render("W" * NAME_MAX, True, (0, 0, 0))
         field_w, field_h = sample.get_width() + 16, sample.get_height() + 8
         gap = 7
-        blocks = lines + [prompt, None, foot]
+        blocks = lines + [prompt, None, note, foot]
         width = max([t.get_width() for t in blocks if t is not None] + [field_w]) + 40
         height = sum(t.get_height() if t is not None else field_h for t in blocks) + gap * (len(blocks) - 1) + 26
         panel = _new_rgba((width, height))
@@ -4032,7 +4140,8 @@ class Game:
         name_w = font.size("W" * NAME_MAX)[0]
         score_w = font.size("000000")[0]
         col_gap = 18
-        width = pad_x * 2 + rank_w + col_gap + name_w + col_gap + score_w
+        flag_w, flag_gap = 20, 8  # flags are 20x10 (flagcdn w20)
+        width = pad_x * 2 + rank_w + flag_gap + flag_w + flag_gap + name_w + col_gap + score_w
         _, _, centre_y, _ = self._title_char_select_bounds()
         min_top = title_bottom + 4
         max_bot = self._title_footer_help_y() - 8
@@ -4058,7 +4167,8 @@ class Game:
         panel.fill((36, 24, 16, 215))
         pygame.draw.rect(panel, (255, 220, 120, 255), panel.get_rect(), 2)
         x_rank = pad_x
-        x_name = x_rank + rank_w + col_gap
+        x_flag = x_rank + rank_w + flag_gap
+        x_name = x_flag + flag_w + flag_gap
         x_score = x_name + name_w + col_gap + score_w  # right edge
         if not entries:
             msg = "Loading scores" if status == "loading" else "No scores yet - be the first!"
@@ -4068,7 +4178,15 @@ class Game:
             y = pad_y + i * row_h
             colour = gold if i == 0 else (cream if i < 3 else dim)
             if i < len(entries):
-                name, value = entries[i]
+                name, value, country = entries[i]
+                flag = self.flags.get(country) if country else None
+                if flag is not None:
+                    fy = y + (font.get_height() - flag.get_height()) // 2
+                    pygame.draw.rect(panel, (20, 14, 10, 255), (x_flag - 1, fy - 1, flag.get_width() + 2, flag.get_height() + 2))
+                    panel.blit(flag, (x_flag + (flag_w - flag.get_width()) // 2, fy))
+                elif country:  # not downloaded (yet): the code, muted
+                    c = self.font_title_copy.render(country, True, (150, 134, 104))
+                    panel.blit(c, (x_flag + (flag_w - c.get_width()) // 2, y + (font.get_height() - c.get_height()) // 2))
                 r = font.render(f"{i + 1}.", True, colour)
                 panel.blit(r, (x_rank + rank_w - r.get_width(), y))
                 panel.blit(font.render(name, True, colour), (x_name, y))
@@ -4226,9 +4344,9 @@ def main(argv=None):
         if headless:
             return _run_net_headless(game, screen, args)
     if args.demo_scores:
-        game.board.entries = [("Holly", 1460), ("Archie", 1215), ("Dad", 980), ("Nathan", 744),
-                              ("Rose", 610), ("Clara", 502), ("Amy", 388), ("Rory", 251),
-                              ("K9", 140), ("Davros", 12)]
+        game.board.entries = [("Holly", 1460, "GB"), ("Archie", 1215, "GB"), ("Dad", 980, "IE"),
+                              ("Nathan", 744, "US"), ("Rose", 610, "FR"), ("Clara", 502, "DE"),
+                              ("Amy", 388, "ES"), ("Rory", 251, "IT"), ("K9", 140, "AU"), ("Davros", 12, "")]
         game.board.status = "online"
     if args.scene in ("title", "title_top10"):
         game.mode = "title"
