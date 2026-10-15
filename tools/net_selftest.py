@@ -95,6 +95,15 @@ def teleport(j, h, cell, facing):
     h.other.moving = False
 
 
+def walk(g, now):
+    """Like nudge, but turns when a step is refused (the start TARDIS or a
+    Dalek can block an open cell, and nudge would push at it forever)."""
+    if g.mode != "play" or g.busy() or g.won or g.dead or g.disguised:
+        return
+    if not g.try_action(("step", 1), now):
+        g.try_action(("turn", 1), now)
+
+
 def corridor(g, length):
     for d in G.DIR_ORDER:
         run = g._straight_run(d, length)
@@ -138,10 +147,11 @@ check("no Dalek enters the start area", inside[0] == 0 and len(h.safe_cells) > 6
 
 # Joiner walks; host sees it move. Then a forged move through a hedge is refused.
 before = h.other.cell
-j.nudge(clock.now())
-pump([h, j], 1500, each=lambda n: j.nudge(n))  # (time to turn out of a dead end first)
-check("host follows the joiner's moves", h.other.cell == (j.col, j.row) and h.other.cell != before,
-      f"{before} -> {h.other.cell}")
+seen_cells = set()
+pump([h, j], 1500, each=lambda n: (walk(j, n), seen_cells.add(h.other.cell)))
+pump([h, j], 200)                                 # last update arrives
+check("host follows the joiner's moves", h.other.cell == (j.col, j.row) and len(seen_cells) > 1,
+      f"host saw {len(seen_cells)} cells, ends {h.other.cell}")
 wall = next((c, r) for r in range(1, G.MAZE_SIZE) for c in range(1, G.MAZE_SIZE)
             if not h.is_open(c, r) and abs(c - h.other.cell[0]) + abs(r - h.other.cell[1]) == 1)
 good = h.other.cell
@@ -242,7 +252,7 @@ h.net.blocked = j.net.blocked = True
 pump([h, j], net.TIMEOUT_S * 1000 + 500, until=lambda n: h.net is None and j.net is None)
 check("connection loss noticed on both", h.net is None and j.net is None and h.net_notice and j.net_notice)
 before = [tuple(d.pos) for d in j.daleks]
-pump([h, j], 1500, each=lambda n: j.nudge(n))
+pump([h, j], 1500, each=lambda n: walk(j, n))
 check("the joiner plays on alone (its Daleks move)", [tuple(d.pos) for d in j.daleks] != before and j.mode == "play")
 shot(j, "lan_connection_lost.png")
 
@@ -319,11 +329,11 @@ def listen(g):
 h, j = new_pair(47489)
 connect(h, j)
 hlog, jlog = listen(h), listen(j)
-pump([h, j], 1500, each=lambda n: j.nudge(n))
+pump([h, j], 1500, each=lambda n: walk(j, n))
 steps = [v for n, v in hlog if n.startswith("step") and v is not None]
 check("host hears the joiner's footsteps", len(steps) >= 4 and all(0 < v <= G.REMOTE_SOUND_GAIN for v in steps),
       f"{len(steps)} steps, loudest {max(steps, default=0)}")
-pump([h, j], 1500, each=lambda n: h.nudge(n))
+pump([h, j], 1500, each=lambda n: walk(h, n))
 steps = [v for n, v in jlog if n.startswith("step") and v is not None]
 check("joiner hears the host's footsteps", len(steps) >= 4, f"{len(steps)} steps")
 del hlog[:]
@@ -355,9 +365,26 @@ check("watching: sound is heard from the survivor", j.watching(clock.now()) and 
       and abs(lp[0] - h.col) + abs(lp[1] - h.row) < 1.5, f"listener {tuple(round(x, 1) for x in lp)}, host {(h.col, h.row)}")
 check("watching: the Daleks still hum", max(hums) > 0.0, f"loudest hum {max(hums):.3f}")
 h.disguised = False
-pump([h, j], 1500, each=lambda n: h.nudge(n))
+pump([h, j], 1500, each=lambda n: walk(h, n))
 steps = [v for n, v in jlog if n.startswith("step") and v is not None]
 check("watching: the survivor's steps are heard", len(steps) >= 4, f"{len(steps)} steps, loudest {max(steps, default=0)}")
+h._net_close(); j._net_close()
+
+# 7d. Cloak: partial recharge (each player's own), and the quiet bed stops.
+check("recharge scales with time hidden", [G.cloak_recharge_ms(x) for x in (0, 1000, 2000, 3000, 4000, 9000)]
+      == [1000, 1000, 1500.0, 2250.0, 3000.0, 3000.0])
+h, j = new_pair(47493)
+connect(h, j)
+hlog = listen(h)
+pump([h, j], 300)
+j.toggle_disguise(clock.now())
+pump([h, j], 2000)
+j.toggle_disguise(clock.now())
+pump([h, j], 400)
+check("joiner's 2 s hide: about 1.5 s recharge, its own", 1400 <= j.cooldown_len <= 1700 and h.cooldown_len == G.DISGUISE_COOLDOWN_MS,
+      f"joiner {j.cooldown_len:.0f} ms, host {h.cooldown_len:.0f} ms")
+check("host hears the joiner's new cloak sounds", {"cloak_on", "cloak_off"} <= {n for n, v in hlog if v is not None})
+check("the cloak bed stops on uncloaking", not j.sfx.cloak_loop_on())
 h._net_close(); j._net_close()
 
 # 8. Transport: reliable events under heavy loss, stale states dropped.

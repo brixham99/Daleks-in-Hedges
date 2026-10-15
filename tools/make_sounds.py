@@ -302,34 +302,86 @@ def _chime(freq: float, dur: float, tau: float, rng) -> np.ndarray:
     return out * np.minimum(1.0, t / 0.002)
 
 
-def make_cloak(rising: bool) -> np.ndarray:
-    """Sped-up wind chime / teleport shimmer: a run of chimes and a sparkle."""
-    rng = np.random.default_rng(31 if rising else 47)
-    dur = 0.46
+def _flanger(x, base_ms, depth_ms, rate_hz, mix=0.6, feedback=0.45):
+    """Swept comb (phaser/flanger feel): a short delay that drifts."""
+    n = len(x)
+    t = np.arange(n) / SR
+    delay = (base_ms + depth_ms * (0.5 + 0.5 * np.sin(2 * np.pi * rate_hz * t))) * SR / 1000.0
+    y = np.zeros(n)
+    idx = np.arange(n) - delay
+    for _ in range(2):  # two passes approximate a little feedback
+        src = x + feedback * y
+        y = np.interp(idx, np.arange(n), src, left=0.0, right=0.0)
+    return x * (1 - mix) + y * mix
+
+
+def _drone(t, f_of_t, partials=7, cutoff=900.0):
+    """Band-limited saw-ish drone along a pitch curve, dark (low-passed)."""
+    phase = 2 * np.pi * np.cumsum(f_of_t) / SR
+    x = np.zeros(len(t))
+    for k in range(1, partials + 1):
+        x += np.sin(k * phase) / k * np.exp(-k * 0.18)
+    return onepole_lp(onepole_lp(x, cutoff), cutoff)
+
+
+def _shimmer(dur: float, seed: int, down: bool = True) -> np.ndarray:
+    """Dark electronic shimmer: low filtered drone, ring-modulated metallic
+    texture through a drifting comb, and a slight pitch sweep."""
+    rng = np.random.default_rng(seed)
     n = int(dur * SR)
     t = np.arange(n) / SR
-    # Pentatonic run C6..E7 (rising) or the reverse (falling).
-    notes = [1046.5, 1174.7, 1318.5, 1568.0, 1760.0, 2093.0, 2349.3, 2637.0]
-    if not rising:
-        notes = notes[::-1]
-    x = np.zeros(n)
-    spacing = 0.034
-    for i, f in enumerate(notes):
-        start = int((i * spacing + rng.uniform(0, 0.006)) * SR)
-        c = _chime(f, dur, 0.075, rng) * (0.75 + 0.25 * rng.random())
-        x[start:] += c[: n - start]
-    # Airy shimmer: high noise with a fast flutter, swelling over the run.
-    noise = onepole_hp(rng.uniform(-1, 1, n), 5000.0)
-    flutter = 0.5 + 0.5 * np.sin(2 * np.pi * 38.0 * t)
-    swell = np.sin(np.pi * np.clip(t / 0.36, 0, 1)) ** 2
-    x += normalise(noise, 1.0) * flutter * swell * 0.18
-    # A soft sweep underneath (up for on, down for off).
-    f0, f1 = (500.0, 1500.0) if rising else (1500.0, 500.0)
-    sweep_f = f0 * (f1 / f0) ** np.clip(t / 0.34, 0, 1)
-    sweep = np.sin(2 * np.pi * np.cumsum(sweep_f) / SR) * swell * 0.12
-    x += sweep
-    x = onepole_lp(x, 9000.0)
-    return fade(normalise(x, 0.7), 0.002, 0.06)
+    u = t / dur
+    sweep = 2.0 ** ((-0.45 if down else 0.3) * u)            # a slight slide down (or up)
+    drone = _drone(t, 55.0 * sweep) + 0.6 * _drone(t, 82.6 * sweep, 5, 700.0)
+    carrier = np.sin(2 * np.pi * np.cumsum(420.0 * sweep) / SR)
+    modulator = np.sin(2 * np.pi * np.cumsum(np.full(n, 131.0) * (1 + 0.15 * u)) / SR)
+    ring = carrier * modulator                               # inharmonic, metallic
+    air = biquad_bp(rng.standard_normal(n), 1800.0, 2.5) * 0.25
+    texture = _flanger(ring * 0.7 + air, 1.2, 5.0, 0.9)
+    texture = onepole_lp(texture, 3200.0)
+    return normalise(drone, 1.0) * 0.75 + normalise(texture, 1.0) * 0.5
+
+
+def make_cloak_on() -> np.ndarray:
+    """Cloak on, ~1.3 s: the shimmer swells in fast and sinks into a faint tail."""
+    dur = 1.35
+    x = _shimmer(dur, 31, down=True)
+    t = np.arange(len(x)) / SR
+    env = np.minimum(1.0, t / 0.05) * np.exp(-t / 0.42) * 0.85 + 0.15 * np.exp(-t / 0.9)
+    x = onepole_lp(x * env, 6000.0)
+    return fade(normalise(x, 0.7), 0.003, 0.25)
+
+
+def make_cloak_off() -> np.ndarray:
+    """Cloak off, ~0.6 s: a reversed swell, rising, ending on a soft thud."""
+    dur = 0.6
+    x = _shimmer(dur, 47, down=False)
+    t = np.arange(len(x)) / SR
+    env = np.exp(-t / 0.2)                                    # decays forwards ...
+    x = (x * env)[::-1]                                       # ... so reversed it swells
+    thump = np.sin(2 * np.pi * 70.0 * t[:int(0.09 * SR)]) * np.exp(-t[:int(0.09 * SR)] / 0.03)
+    x[-len(thump):] += thump * 0.4
+    x = onepole_lp(x, 6000.0)
+    return fade(normalise(x, 0.7), 0.02, 0.03)
+
+
+def make_cloak_loop() -> np.ndarray:
+    """Very quiet bed while cloaked: a 4 s seamless loop (every component
+    repeats a whole number of times in it)."""
+    rng = np.random.default_rng(53)
+    dur = 4.0
+    n = int(dur * SR)
+    t = np.arange(n) / SR
+
+    def osc(cycles, phase=0.0):
+        return np.sin(2 * np.pi * cycles * t / dur + phase)
+
+    drone = sum(osc(55.0 * dur * k, rng.uniform(0, 6.3)) / k * np.exp(-k * 0.3) for k in range(1, 6))
+    drone *= 0.8 + 0.2 * osc(1)
+    ring = osc(420.0 * dur) * osc(131.0 * dur) * (0.5 + 0.5 * osc(2, 1.0)) * 0.25
+    hiss = _circular_band(n, rng, 1500.0, 1.0) * (0.6 + 0.4 * osc(3, 2.0))
+    x = normalise(drone, 1.0) * 0.8 + ring + normalise(hiss, 1.0) * 0.12
+    return normalise(x, 0.5)
 
 
 def _circular_band(n, rng, fc, width_oct, tilt=0.0):
@@ -583,8 +635,9 @@ SOUNDS = {
     "step2": lambda: make_step(202, 0.88),
     "step3": lambda: make_step(303, 1.12),
     "rustle": make_rustle,
-    "cloak_on": lambda: make_cloak(True),
-    "cloak_off": lambda: make_cloak(False),
+    "cloak_on": make_cloak_on,
+    "cloak_off": make_cloak_off,
+    "cloak_loop": make_cloak_loop,
     "dalek_hum": make_dalek_hum,
     "title_theme": make_title_theme,
     "tardis_demat": make_tardis_demat,

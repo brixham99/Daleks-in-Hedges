@@ -120,7 +120,16 @@ DEATH_FADE_LEVELS = 16
 # straight onto the window surface - see Game.draw.)
 PUFF_LEVELS = 12
 DISGUISE_MS = 4000
-DISGUISE_COOLDOWN_MS = 3000
+DISGUISE_COOLDOWN_MS = 3000         # recharge after a full DISGUISE_MS hide ...
+DISGUISE_MIN_COOLDOWN_MS = 1000     # ... in proportion to the time hidden, but at least this
+CLOAK_LOOP_FILE = "cloak_loop.wav"  # very quiet bed while cloaked (tools/make_sounds.py)
+CLOAK_LOOP_VOLUME = 0.22
+
+
+def cloak_recharge_ms(hidden_ms: float) -> float:
+    """Recharge after uncloaking: the full time scaled by how long you hid."""
+    frac = max(0.0, min(1.0, hidden_ms / DISGUISE_MS))
+    return max(DISGUISE_MIN_COOLDOWN_MS, DISGUISE_COOLDOWN_MS * frac)
 POOF_MS = 280
 DISGUISE_SCALE = 0.86
 # Gun tip and eye-stalk tip in the 160 px source images. SW/NW are exact
@@ -891,7 +900,7 @@ class Sounds:
             return
         try:
             pygame.mixer.set_num_channels(16)
-            pygame.mixer.set_reserved(HUM_CHANNELS)
+            pygame.mixer.set_reserved(HUM_CHANNELS + 2)  # hums, the title theme, the cloak bed
             self.hum_channels = [pygame.mixer.Channel(i) for i in range(HUM_CHANNELS)]
         except Exception:
             self.hum_channels = []
@@ -910,6 +919,14 @@ class Sounds:
         except Exception:
             self.title_theme = None
             self.title_channel = None
+        self.cloak_loop = None
+        self.cloak_channel = None
+        try:
+            self.cloak_loop = pygame.mixer.Sound(os.path.join(SOUND_DIR, CLOAK_LOOP_FILE))
+            self.cloak_loop.set_volume(CLOAK_LOOP_VOLUME)
+            self.cloak_channel = pygame.mixer.Channel(HUM_CHANNELS + 1)
+        except Exception:
+            self.cloak_loop = None
         for name, filename in SOUND_FILES.items():
             try:
                 snd = pygame.mixer.Sound(os.path.join(SOUND_DIR, filename))
@@ -1045,6 +1062,28 @@ class Sounds:
             self.title_channel.stop()
         except Exception:
             pass
+
+    def start_cloak_loop(self):
+        if self.muted or not self.ok or self.cloak_loop is None or self.cloak_channel is None:
+            return
+        try:
+            self.cloak_channel.play(self.cloak_loop, loops=-1, fade_ms=300)
+        except Exception:
+            pass
+
+    def stop_cloak_loop(self):
+        if self.cloak_channel is None:
+            return
+        try:
+            self.cloak_channel.fadeout(120)
+        except Exception:
+            pass
+
+    def cloak_loop_on(self) -> bool:
+        try:
+            return self.cloak_channel is not None and bool(self.cloak_channel.get_busy())
+        except Exception:
+            return False
 
     def toggle_mute(self):
         self.muted = not self.muted
@@ -1947,6 +1986,7 @@ class Game:
         self.disguise_t0 = -1e9
         self.disguise_end_t = -1e9
         self.cooldown_until = 0.0
+        self.cooldown_len = DISGUISE_COOLDOWN_MS
         self.disguise_pending = False
         self.exit_cell = (MAZE_SIZE - 2, MAZE_SIZE - 2)
         self.start_t0 = None  # game time of the first update
@@ -2180,6 +2220,7 @@ class Game:
         if self.dead or self.won:
             return
         self._stop_taunt()
+        self.sfx.stop_cloak_loop()
         self.sfx.play("laser")
         self.dead_pos = self.visual_pos(now)
         self.dead = True
@@ -2210,6 +2251,7 @@ class Game:
 
     def _start_disguise(self, now: float):
         self.sfx.play("cloak_on")
+        self.sfx.start_cloak_loop()
         self.disguised = True
         self.disguise_t0 = now
         self.disguise_pending = False
@@ -2219,9 +2261,11 @@ class Game:
 
     def _end_disguise(self, now: float):
         self.sfx.play("cloak_off")
+        self.sfx.stop_cloak_loop()
         self.disguised = False
         self.disguise_end_t = now
-        self.cooldown_until = now + DISGUISE_COOLDOWN_MS
+        self.cooldown_len = cloak_recharge_ms(now - self.disguise_t0)
+        self.cooldown_until = now + self.cooldown_len
 
     # ----- Debug scenes for headless screenshots -------------------------
     def _straight_run(self, direction, length: int):
@@ -3446,7 +3490,7 @@ class Game:
             status = "active"
         elif now < self.cooldown_until:
             left = self.cooldown_until - now
-            frac = 1.0 - left / DISGUISE_COOLDOWN_MS
+            frac = 1.0 - left / max(1.0, self.cooldown_len)
             bar = (150, 128, 84)
             status = "recharge"
         else:

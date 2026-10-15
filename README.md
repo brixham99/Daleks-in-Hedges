@@ -25,7 +25,7 @@ On the title screen, choose Archie or Holly and start. Every 7 seconds the title
 
 Daleks roam the maze. A Dalek sees you only along the corridor it is facing, up to 8 cells away with no hedge in between. When it spots you it shouts "Exterminate!", its eye stalk glows, and a moment later it fires. Listen out: each Dalek hums as it glides, louder the closer it is, even through hedges.
 
-Use the **Chameleon Cloak** to turn into a hedge for up to 4 seconds. Daleks can't see you while cloaked. It takes 3 seconds to recharge; the badge in the bottom-right corner shows its charge.
+Use the **Chameleon Cloak** to turn into a hedge for up to 4 seconds. Daleks can't see you while cloaked. It recharges in proportion to how long you hid: 3 seconds after a full 4-second hide, 1.5 seconds after 2 seconds, and never less than 1 second; the badge in the bottom-right corner shows its charge.
 
 Step onto the TARDIS to go to the next level. Level N has 3 + 2 × (N − 1) Daleks, up to 15. If you are exterminated, you return to the title screen.
 
