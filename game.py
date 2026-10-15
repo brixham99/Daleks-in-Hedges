@@ -18,6 +18,8 @@ import random
 import sys
 import threading
 import time
+import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -1050,13 +1052,31 @@ def clean_country(text) -> str:
     return text if len(text) == 2 and text.isascii() and text.isalpha() else ""
 
 
+def open_url(req, timeout):
+    """urlopen that copes with Macs whose Python has no CA certificates
+    (python.org installs before "Install Certificates" is run): retry with
+    certifi if present, else without verification. Only used for public,
+    read-only lookups (country code, flag PNGs that are checked on arrival)."""
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as e:
+        if not isinstance(getattr(e, "reason", None), ssl.SSLError):
+            raise
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ctx = ssl._create_unverified_context()
+    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
 def lookup_country() -> str:
     """This player's country from a free HTTPS lookup (blocking: call it on a
     background thread). "" if every service fails."""
     for url in COUNTRY_URLS:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "DaleksInHedges/1.0"})
-            with urllib.request.urlopen(req, timeout=COUNTRY_TIMEOUT) as resp:
+            with open_url(req, COUNTRY_TIMEOUT) as resp:
                 code = clean_country(resp.read(64).decode("ascii", "replace"))
             if code:
                 return code
@@ -1083,7 +1103,7 @@ class Flags:
         try:
             req = urllib.request.Request(FLAG_URL.format(code=code.lower()),
                                          headers={"User-Agent": "DaleksInHedges/1.0"})
-            with urllib.request.urlopen(req, timeout=FLAG_TIMEOUT) as resp:
+            with open_url(req, FLAG_TIMEOUT) as resp:
                 data = resp.read(65536)
             if data[:8] != b"\x89PNG\r\n\x1a\n":
                 return
