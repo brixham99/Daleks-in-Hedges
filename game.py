@@ -264,6 +264,7 @@ NET_WATCH_PAN_MS = 600         # camera glide to the player you are watching
 NET_NOTICE_MS = 3500           # "Connection lost" stays up this long
 NET_JOIN_WAIT_S = 6.0          # no answer from a host in this long: back to the list
 DALEK_STATES = ("roam", "aim", "fire")
+REMOTE_SOUND_GAIN = 0.7       # the other player's steps, bumps and cloak: a bit quieter than yours
 DALEK_RECOVER_MS = 1200        # network game: after a kill the shooter patrols again (the other player lives on)
 
 KEY_ACTIONS = {
@@ -971,6 +972,12 @@ class Sounds:
         self.played[name] = self.played.get(name, 0) + 1
         return ch
 
+    def step_at(self, left: float, right: float):
+        """Someone else's footstep at this (left, right) channel volume."""
+        choices = [n for n in STEP_SOUNDS if n != self.last_step]
+        self.last_step = self._rng.choice(choices)
+        return self.play_voice(self.last_step, left, right)
+
     def step(self) -> bool:
         """A soft footstep, never the same sample twice running."""
         choices = [n for n in STEP_SOUNDS if n != self.last_step]
@@ -1387,6 +1394,10 @@ class RemotePlayer:
         self.pos = [float(cell[0]), float(cell[1])]
         self.dead_pos = tuple(self.pos)
         self.feet = (0, 0)
+        self.hop_key = None      # (src, dst) of the hop being heard
+        self.hops_heard = 0
+        if not hasattr(self, "sounds_seen"):
+            self.sounds_seen = {}  # sound counters last reported (bumps), kept across levels
 
     def target_pos(self):
         if self.moving:
@@ -1714,6 +1725,8 @@ class Game:
         self.net_last_now = None
         self.other_voice_until = -1e9
         self.watch_blend = 0.0
+        self.ow_count = 0
+        self.rustle_count = 0
         self.safe_cells = frozenset()
         self.exit_hold = False       # in the TARDIS, waiting for the other player
         self.exit_release_t = -1e9
@@ -2423,9 +2436,11 @@ class Game:
             self.bump_times = []
             self.ow_quiet_until = now + OW_QUIET_MS
             self.sfx.play("ow")
+            self.ow_count += 1         # (sent to the other player in a network game)
         elif now - self.rustle_t >= RUSTLE_GAP_MS:
             self.rustle_t = now
             self.sfx.play("rustle")
+            self.rustle_count += 1
 
     def try_action(self, action, now: float) -> bool:
         if self.won or self.dead or self.disguised or self.disguise_pending:
@@ -2670,6 +2685,65 @@ class Game:
         u = self.exit_walk_u(now)
         return max(0.0, min(1.0, 1.0 - (u - EXIT_FADE_FROM) / (EXIT_FADE_TO - EXIT_FADE_FROM)))
 
+    # ----- Where the sound is heard from ------------------------------------
+    def listener_pos(self, now: float):
+        """Your own position, or (network game, watching) the other player's,
+        so it sounds as if you are there with them."""
+        if self.other is not None and self.watching(now):
+            return tuple(self.other.pos)
+        return self.visual_pos(now)
+
+    def sound_live(self, now: float) -> bool:
+        """Game sounds (hum, callouts) run: in play, or watching the other player."""
+        if self.mode != "play" or self.card_t0 is not None:
+            return False
+        return not (self.dead or self.won) or self.watching(now)
+
+    def _levels_at(self, pos, now: float, gain: float):
+        """(left, right) for a sound at pos: the hum's falloff and stereo pan."""
+        lx, ly = self.listener_pos(now)
+        dist = math.hypot(pos[0] - lx, pos[1] - ly)
+        vol = gain * self._hum_closeness(dist)
+        if vol < 0.002:
+            return 0.0, 0.0
+        ax, _ = tile_origin(lx, ly)
+        dx, _ = tile_origin(pos[0], pos[1])
+        pan = max(-1.0, min(1.0, (dx - ax) / (self.view_w / 2))) * HUM_PAN
+        return vol * (1.0 - max(0.0, pan)), vol * (1.0 + min(0.0, pan))
+
+    def _remote_sound(self, name: str, now: float):
+        o = self.other
+        if o is None or self.card_t0 is not None:
+            return
+        left, right = self._levels_at(o.pos, now, REMOTE_SOUND_GAIN)
+        if left > 0.0 or right > 0.0:
+            self.sfx.play_voice(name, left, right)
+
+    def _remote_steps(self, now: float):
+        """The other player's footsteps: two per cell, as each half-hop lands,
+        from their replicated hop progress (or a cell change we only saw late)."""
+        o = self.other
+        key = (o.src, o.dst) if o.moving and not o.dead else None
+        if key != o.hop_key:
+            if o.hop_key is not None and o.hops_heard < 2 and not o.dead:
+                self._remote_step(now)   # that hop finished between packets
+            o.hop_key, o.hops_heard = key, 0
+        if key is None:
+            return
+        if o.hops_heard == 0 and o.u >= 0.5:
+            o.hops_heard = 1
+            self._remote_step(now)
+        if o.hops_heard == 1 and o.u >= 1.0:
+            o.hops_heard = 2
+            self._remote_step(now)
+
+    def _remote_step(self, now: float):
+        if self.card_t0 is not None:
+            return
+        left, right = self._levels_at(self.other.pos, now, REMOTE_SOUND_GAIN)
+        if left > 0.0 or right > 0.0:
+            self.sfx.step_at(left, right)
+
     # ----- Dalek proximity hum -------------------------------------------
     def _hum_distance(self, d: Dalek, archie_pos) -> float:
         """Distance in cells from Archie to Dalek d for its hum: the straight
@@ -2699,8 +2773,10 @@ class Game:
 
     def _update_hum(self, now: float, dt: float):
         active = not (self.dead or self.won or self.sfx.muted or self.card_t0 is not None)
+        if not active and not self.sfx.muted and self.watching(now):
+            active = True  # watching the other player: hear what they hear
         k = 1.0 - math.exp(-dt / HUM_DIST_SMOOTH_MS) if dt > 0 else 1.0
-        archie_pos = self.visual_pos(now)
+        archie_pos = self.listener_pos(now)
         ax, ay = tile_origin(*archie_pos)
         for i, d in enumerate(self.daleks):
             dist = self._hum_distance(d, archie_pos)
@@ -2783,7 +2859,7 @@ class Game:
         """(left, right) channel volume for a callout from Dalek d, using the
         same distance (_hum_distance), closeness curve and stereo pan as its
         hum, scaled to TAUNT_MAX instead of HUM_MAX."""
-        archie_pos = self.visual_pos(now)
+        archie_pos = self.listener_pos(now)
         vol = TAUNT_MAX * self._hum_closeness(self._hum_distance(d, archie_pos))
         if vol < 0.002:
             return 0.0, 0.0
@@ -2810,7 +2886,7 @@ class Game:
     def _update_taunt(self, now: float):
         """Every 30-45 s of play the nearest Dalek says a random callout,
         one at a time; while it speaks its volume follows that Dalek."""
-        if self.mode != "play" or self.dead or self.won or self.card_t0 is not None:
+        if not self.sound_live(now):
             self._stop_taunt()
             return
         if self.taunt_ch is not None:
@@ -2838,7 +2914,7 @@ class Game:
         self._schedule_taunt(now)
         if not self.daleks:
             return
-        archie_pos = self.visual_pos(now)
+        archie_pos = self.listener_pos(now)
         nearest = min(self.daleks, key=lambda d: self._hum_distance(d, archie_pos))
         left, right = self._taunt_levels(nearest, now)
         if left <= 0.0 and right <= 0.0:
@@ -3869,7 +3945,7 @@ class Game:
         st = {"lv": self.level, "c": [self.col, self.row], "s": list(self.src), "d": list(self.dst),
               "m": int(self.moving), "u": round(self._step_u(now), 3) if self.moving else 0,
               "f": self.facing_index, "k": int(self.disguised), "x": int(self.dead), "w": int(self.won),
-              "p": self.score, "ch": self.character}
+              "p": self.score, "ch": self.character, "ow": self.ow_count, "ru": self.rustle_count}
         if self.net_role == "host":
             st["fst"] = self.net_first
             st["dk"] = [[round(d.pos[0], 3), round(d.pos[1], 3), d.target[0], d.target[1],
@@ -3889,6 +3965,7 @@ class Game:
             self._net_apply_state(link.state or {}, now)
         if self.other is not None:
             self.other.ease_towards(dt)
+            self._remote_steps(now)
         if link.state_due():
             link.send_state(self._net_state(now))
         if link.lost() and not self.net_over:
@@ -3916,9 +3993,18 @@ class Game:
             o.u = max(o.u, float(st.get("u", 0.0)))
         o.moving = moving
         o.facing = DIR_ORDER[int(st.get("f", 0)) % 4]
-        if bool(st.get("k")) and not o.disguised:
+        cloaked = bool(st.get("k"))
+        if cloaked != o.disguised and not o.dead:
+            self._remote_sound("cloak_on" if cloaked else "cloak_off", now)
+        if cloaked and not o.disguised:
             o.disguise_t0 = now
-        o.disguised = bool(st.get("k"))
+        o.disguised = cloaked
+        for key, name in (("ow", "ow"), ("ru", "rustle")):
+            count = int(st.get(key, 0))
+            seen = o.sounds_seen.get(key)
+            if seen is not None and count > seen:
+                self._remote_sound(name, now)  # one at a time: their own rate limits already applied
+            o.sounds_seen[key] = count
         if self.net_role == "join":
             self.net_first = st.get("fst")
             if "dk" in st:
@@ -3988,6 +4074,7 @@ class Game:
             self._kill(now, shooter)
         elif kind == "died" and o is not None:      # the other player was exterminated
             i = int(data.get("d", -1))
+            self.sfx.play("laser")
             self._net_other_down(now, self.daleks[i] if 0 <= i < len(self.daleks) else None)
         elif kind == "tardis" and o is not None:    # (host) the joiner stepped into the TARDIS
             o.dead = False

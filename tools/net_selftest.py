@@ -139,7 +139,7 @@ check("no Dalek enters the start area", inside[0] == 0 and len(h.safe_cells) > 6
 # Joiner walks; host sees it move. Then a forged move through a hedge is refused.
 before = h.other.cell
 j.nudge(clock.now())
-pump([h, j], 600, each=lambda n: j.nudge(n))
+pump([h, j], 1500, each=lambda n: j.nudge(n))  # (time to turn out of a dead end first)
 check("host follows the joiner's moves", h.other.cell == (j.col, j.row) and h.other.cell != before,
       f"{before} -> {h.other.cell}")
 wall = next((c, r) for r in range(1, G.MAZE_SIZE) for c in range(1, G.MAZE_SIZE)
@@ -297,6 +297,68 @@ for victim, port in (("joiner", 47487), ("host", 47488)):
     check(f"{victim} shot: that Dalek can still get the survivor", survivor.dead and h.net_over and j.net_over,
           f"dead {survivor.dead}, over {h.net_over}/{j.net_over}, dalek {d.state} at {d.cell()} facing {d.facing}, run {run[0]}->{run[-1]}, survivor at {(survivor.col, survivor.row)} disguised {survivor.disguised} won {survivor.won}")
     h._net_close(); j._net_close()
+
+# 7c. Sound: the other player's steps, bumps and cloak; and watching keeps
+# the game audible, heard from where the survivor is.
+def listen(g):
+    log = []
+    real_voice = g.sfx.play_voice
+    real_play = g.sfx.play
+
+    def voice(name, left, right):
+        log.append((name, round(max(left, right), 3)))
+        return real_voice(name, left, right)
+
+    def play(name):
+        log.append((name, None))
+        return real_play(name)
+    g.sfx.play_voice, g.sfx.play = voice, play
+    return log
+
+
+h, j = new_pair(47489)
+connect(h, j)
+hlog, jlog = listen(h), listen(j)
+pump([h, j], 1500, each=lambda n: j.nudge(n))
+steps = [v for n, v in hlog if n.startswith("step") and v is not None]
+check("host hears the joiner's footsteps", len(steps) >= 4 and all(0 < v <= G.REMOTE_SOUND_GAIN for v in steps),
+      f"{len(steps)} steps, loudest {max(steps, default=0)}")
+pump([h, j], 1500, each=lambda n: h.nudge(n))
+steps = [v for n, v in jlog if n.startswith("step") and v is not None]
+check("joiner hears the host's footsteps", len(steps) >= 4, f"{len(steps)} steps")
+del hlog[:]
+pump([h, j], 400)
+j.toggle_disguise(clock.now())
+for _ in range(G.OW_BUMPS):
+    j.last_bump_t = -1e9
+    j._hedge_bump(clock.now())
+    pump([h, j], 120)
+pump([h, j], 400)
+names = [n for n, v in hlog if v is not None]
+check("host hears the joiner's cloak and hedge bumps", "cloak_on" in names and ("rustle" in names or "ow" in names),
+      f"{sorted(set(names))}")
+# Watching: the joiner is exterminated; it still hears Daleks and the host's steps.
+j.toggle_disguise(clock.now())
+pump([h, j], 300)
+near = sorted((dist, c) for c, dist in h._path_dist((h.col, h.row)).items() if 7 <= dist <= 10 and c not in h.safe_cells)
+dk = h.daleks[0]
+dk.pos, dk.target, dk.state, dk.wait_until = [float(near[0][1][0]), float(near[0][1][1])], near[0][1], "roam", 0.0
+h.disguised = True                       # hidden, so the test Dalek can't end the game
+h.disguise_t0 = clock.now() + 1e6
+h._net_kill_other(clock.now(), h.daleks[1])
+pump([h, j], G.DEATH_MSG_MS + G.NET_WATCH_PAN_MS + 200)
+del jlog[:]
+hums = []
+pump([h, j], 2000, each=lambda n: hums.append(max(max(l) for l in j.sfx.hum_levels)))
+lp = j.listener_pos(clock.now())
+check("watching: sound is heard from the survivor", j.watching(clock.now()) and j.sound_live(clock.now())
+      and abs(lp[0] - h.col) + abs(lp[1] - h.row) < 1.5, f"listener {tuple(round(x, 1) for x in lp)}, host {(h.col, h.row)}")
+check("watching: the Daleks still hum", max(hums) > 0.0, f"loudest hum {max(hums):.3f}")
+h.disguised = False
+pump([h, j], 1500, each=lambda n: h.nudge(n))
+steps = [v for n, v in jlog if n.startswith("step") and v is not None]
+check("watching: the survivor's steps are heard", len(steps) >= 4, f"{len(steps)} steps, loudest {max(steps, default=0)}")
+h._net_close(); j._net_close()
 
 # 8. Transport: reliable events under heavy loss, stale states dropped.
 a = net.Link("host", port=47485)
