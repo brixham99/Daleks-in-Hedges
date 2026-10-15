@@ -147,7 +147,6 @@ DEMAT_PULSE_MS = 1000        # one fade pulse (and one wheeze-groan) per second 
 DEMAT_LEVELS = 24            # pre-faded copies of the TARDIS (no set_alpha on RGBA)
 TARDIS_LAMP_SRC = (59, 11)   # roof lamp in the 119x200 source image
 DISGUISE_KEYS = (pygame.K_h, pygame.K_LSHIFT, pygame.K_RSHIFT)
-MUTE_KEY = pygame.K_m
 
 # --- Reaching the TARDIS: Archie goes in, it dematerialises, next level ---
 EXIT_WALK_MS = 500           # Archie walks on from his corridor into the TARDIS ...
@@ -285,9 +284,10 @@ DALEK_STATES = ("roam", "aim", "fire")
 REMOTE_SOUND_GAIN = 0.7       # the other player's steps, bumps and cloak: a bit quieter than yours
 DALEK_RECOVER_MS = 1200        # network game: after a kill the shooter patrols again (the other player lives on)
 
-# Secret: hold S and O together for over 2 s in play and the maze fills to 30
+# Secret: hold I and M together for over 2 s in play and the maze fills to 30
 # Daleks (once per hold). A challenge only: scoring is unchanged. In a network
 # game the host spawns them (a joiner's hold is sent as a "swarm" event).
+SECRET_KEYS = (pygame.K_i, pygame.K_m)
 SECRET_HOLD_MS = 2000
 SECRET_DALEKS = 30
 SECRET_CUE = "dalek_find_the_human"
@@ -897,7 +897,6 @@ class Sounds:
 
     def __init__(self):
         self.ok = False
-        self.muted = False
         self.sounds = {}
         self.requested = {}
         self.played = {}
@@ -975,7 +974,7 @@ class Sounds:
 
     def play(self, name: str) -> bool:
         self.requested[name] = self.requested.get(name, 0) + 1
-        if self.muted or not self.ok:
+        if not self.ok:
             return False
         snd = self.sounds.get(name)
         if snd is None:
@@ -991,7 +990,7 @@ class Sounds:
         """Play `name` once at this (left, right) channel volume; returns the
         channel (or None) so the volume can follow a moving Dalek."""
         self.requested[name] = self.requested.get(name, 0) + 1
-        if self.muted or not self.ok:
+        if not self.ok:
             return None
         snd = self.sounds.get(name)
         if snd is None:
@@ -1020,10 +1019,7 @@ class Sounds:
 
     def set_hum(self, i: int, left: float, right: float, keep: bool):
         """Volume of Dalek i's looping hum. Stops the loop when it is silent
-        and not wanted soon (far away, dead, won, muted)."""
-        if self.muted:
-            left = right = 0.0
-            keep = False
+        and not wanted soon (far away, dead, won)."""
         if i < len(self.hum_levels):
             self.hum_levels[i] = (left, right)
         if not self.ok or self.hum is None or i >= len(self.hum_channels):
@@ -1059,10 +1055,10 @@ class Sounds:
             pass
 
     def start_title_theme(self):
-        """Loop the title theme; silent if muted or the file is missing."""
+        """Loop the title theme; silent if the file is missing."""
         self.want_title = True
         self.stop_hums()
-        if self.muted or not self.ok or self.title_theme is None or self.title_channel is None:
+        if not self.ok or self.title_theme is None or self.title_channel is None:
             return
         try:
             if not self.title_channel.get_busy():
@@ -1081,7 +1077,7 @@ class Sounds:
             pass
 
     def start_cloak_loop(self):
-        if self.muted or not self.ok or self.cloak_loop is None or self.cloak_channel is None:
+        if not self.ok or self.cloak_loop is None or self.cloak_channel is None:
             return
         try:
             self.cloak_channel.play(self.cloak_loop, loops=-1, fade_ms=300)
@@ -1101,13 +1097,6 @@ class Sounds:
             return self.cloak_channel is not None and bool(self.cloak_channel.get_busy())
         except Exception:
             return False
-
-    def toggle_mute(self):
-        self.muted = not self.muted
-        if self.muted:
-            self.stop_all()
-        elif self.want_title:
-            self.start_title_theme()
 
 
 def clean_country(text) -> str:
@@ -2441,9 +2430,6 @@ class Game:
         if self.wants_text():
             self._entry_key(key, text, now)  # letters (M, H, R ...) are typed, not actions
             return
-        if key == MUTE_KEY:
-            self.sfx.toggle_mute()
-            return
         if self.card_t0 is not None:
             return  # the level card is showing
         if self.mode == "title":
@@ -2476,9 +2462,9 @@ class Game:
         self.try_action(action, now)
 
     def secret_keys(self, keys, now: float):
-        """S+O held together for over SECRET_HOLD_MS: fill the maze with Daleks.
-        Fires once per hold; both keys must be let go (either) to arm it again."""
-        held = self.mode == "play" and keys[pygame.K_s] and keys[pygame.K_o]
+        """I+M held together for over SECRET_HOLD_MS: fill the maze with Daleks.
+        Fires once per hold; either key must be let go to arm it again."""
+        held = self.mode == "play" and all(keys[k] for k in SECRET_KEYS)
         if not held:
             self.so_t0, self.so_fired = None, False
             return
@@ -2782,8 +2768,8 @@ class Game:
         return HUM_PATH_WEIGHT * path + (1.0 - HUM_PATH_WEIGHT) * straight
 
     def _update_hum(self, now: float, dt: float):
-        active = not (self.dead or self.won or self.sfx.muted or self.card_t0 is not None)
-        if not active and not self.sfx.muted and self.watching(now):
+        active = not (self.dead or self.won or self.card_t0 is not None)
+        if not active and self.watching(now):
             active = True  # watching the other player: hear what they hear
         k = 1.0 - math.exp(-dt / HUM_DIST_SMOOTH_MS) if dt > 0 else 1.0
         archie_pos = self.listener_pos(now)
@@ -2795,7 +2781,7 @@ class Game:
             d.near += (u ** HUM_CURVE - d.near) * k
             if not active:
                 fade_ms = HUM_EXIT_FADE_MS if self.won else HUM_FADE_OUT_MS
-                d.glide = 0.0 if self.sfx.muted else max(0.0, d.glide - dt / fade_ms)
+                d.glide = max(0.0, d.glide - dt / fade_ms)
             elif d.gliding(now):
                 d.glide = min(1.0, d.glide + dt / HUM_FADE_IN_MS)
             else:
@@ -2900,9 +2886,8 @@ class Game:
             self._stop_taunt()
             return
         if self.taunt_ch is not None:
-            if now >= self.taunt_until or self.taunt_dalek not in self.daleks or self.sfx.muted:
-                # Finished (or muted: M already stopped every channel). Keep
-                # taunt_until so a muted-then-unmuted line is not stacked on.
+            if now >= self.taunt_until or self.taunt_dalek not in self.daleks:
+                # Finished. Keep taunt_until so lines are not stacked on.
                 self.taunt_ch = None
                 self.taunt_dalek = None
             else:
@@ -2934,7 +2919,7 @@ class Game:
         self.taunt_last = name
         ch = self.sfx.play_voice(name, left, right)
         if ch is None:
-            return  # muted or no audio
+            return  # no audio
         self.taunt_ch = ch
         self.taunt_dalek = nearest
         self.taunt_name = name
@@ -4090,7 +4075,7 @@ class Game:
             o.dead = False
             o.in_tardis = True
             self._net_arrival("join", now)
-        elif kind == "swarm" and self.net_role == "host":   # the joiner held S+O
+        elif kind == "swarm" and self.net_role == "host":   # the joiner held I+M
             self.swarm()
         elif kind == "bonus":      # (joiner) first into the TARDIS
             self._net_bonus(now)
@@ -4361,11 +4346,10 @@ class Game:
             x0 += img.get_width() + pad_x * 2 + gap
 
     def _draw_title_footer(self, screen):
-        mute = "M unmute" if self.sfx.muted else "M mute"
         lines = [
             "Left/Right or A/D (or 1/2): choose character",
             "Enter / Space: start    N: Two players on a network",
-            "In game: Left/Right turn, Up/Down step, H Chameleon Cloak, " + mute,
+            "In game: Left/Right turn, Up/Down step, H Chameleon Cloak",
         ]
         # Copyright at the very bottom (wrapped); controls sit just above it.
         copy_margin = 8

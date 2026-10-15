@@ -52,7 +52,6 @@ Some Wi-Fi networks (guest, school or office networks) block broadcasts, so the 
 | Up / W | Step forward |
 | Down / S | Step back |
 | H or Shift | Chameleon Cloak (press again to stop early) |
-| M | Mute / unmute |
 | Esc | Quit |
 | Title screen: Left / Right, A / D or 1 / 2 | Choose a character |
 | Title screen: Enter or Space | Start |
