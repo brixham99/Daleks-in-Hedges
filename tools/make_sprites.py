@@ -8,7 +8,9 @@ the larger source art in tools/art/, with clean antialiased edges.
 Every character's figure is FIGURE_H (68 px, ponytail included) on a 74 px
 canvas, feet PAD_BOTTOM up, so nobody is taller than Archie.
 
-Holly: holly_se_source.png is Nathan's front art cut out with cutout_white.py.
+Holly: holly_sw_source.png is Nathan's front art cut out with cutout_white.py.
+Her body (toes, torso) faces SW even though her head turns to the viewer's
+left, so it is SW and SE is its mirror. Judge facing by the feet, not the head.
 Her back views are her old pixel-art backs (holly_n?_old.png) with the head
 scaled to the front art's head/body proportions, unless
 tools/art/holly_ne_source.png exists (white backdrop; NW is its mirror).
@@ -114,7 +116,7 @@ def match_head(back: Image.Image, front: Image.Image) -> Image.Image:
 
 
 def make_holly():
-    front = defringe(Image.open(os.path.join(ART, "holly_se_source.png")), white_bg=False)  # cutout_white already removed the white
+    front = defringe(Image.open(os.path.join(ART, "holly_sw_source.png")), white_bg=False)  # cutout_white already removed the white
     back_src = os.path.join(ART, "holly_ne_source.png")
     if os.path.exists(back_src):
         ne = to_sprite(defringe(Image.open(back_src), white_bg=True))
@@ -122,8 +124,8 @@ def make_holly():
     else:
         ne, nw = (to_sprite(match_head(defringe(Image.open(os.path.join(ART, f"holly_{k}_old.png")),
                                                 white_bg=False), front), sharpen=0) for k in ("ne", "nw"))
-    se = to_sprite(front)
-    return {"se": se, "sw": se.transpose(Image.FLIP_LEFT_RIGHT), "ne": ne, "nw": nw}
+    sw = to_sprite(front)
+    return {"se": sw.transpose(Image.FLIP_LEFT_RIGHT), "sw": sw, "ne": ne, "nw": nw}
 
 
 def save(name, sprites):
