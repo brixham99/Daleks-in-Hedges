@@ -5,6 +5,10 @@
 
 - Background = near-white pixels connected to the border (flood fill), so
   light colours inside the figure (grey hoodie, white soles) stay solid.
+- Enclosed holes (e.g. between legs, or arm/ponytail and body): a white
+  pocket not touching the border is background too if it is big
+  (>= HOLE_MIN px) and mostly flat backdrop white (>= HOLE_FLAT of it within
+  4 of pure white). Socks, lace and soles are shaded, so they stay.
 - JPEG speckle: only the largest connected figure is kept.
 - Edge pixels get alpha from how far they are from white, and their colour
   is unpremultiplied from the white backdrop (no white halo).
@@ -15,6 +19,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 BG_T = 18        # "white" for the flood fill (max channel distance from 255)
+HOLE_MIN, HOLE_FLAT = 1000, 0.4
 SOFT_LO, SOFT_HI = 10, 70   # edge alpha ramp over this distance from white
 
 
@@ -27,6 +32,17 @@ def cutout(img: Image.Image) -> Image.Image:
     m = Image.fromarray(np.pad(np.asarray(m), 1, constant_values=255)).copy()  # (copy: writable for floodfill)
     ImageDraw.floodfill(m, (0, 0), 128)
     bg = (np.asarray(m)[1:-1, 1:-1] == 128)
+    # 1b. Big flat-white enclosed pockets are background seen through gaps.
+    m = m.copy()
+    while True:
+        ys, xs = np.nonzero(np.asarray(m) == 255)
+        if not len(ys):
+            break
+        ImageDraw.floodfill(m, (int(xs[0]), int(ys[0])), 100)
+        comp = np.asarray(m)[1:-1, 1:-1] == 100
+        if comp.sum() >= HOLE_MIN and (d[comp] < 4).mean() >= HOLE_FLAT:
+            bg |= comp
+        ImageDraw.floodfill(m, (int(xs[0]), int(ys[0])), 50)
     # 2. Keep only the largest blob of figure (drops JPEG specks).
     fig = ~bg
     ys, xs = np.nonzero(fig)
