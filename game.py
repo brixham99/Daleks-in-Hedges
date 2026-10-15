@@ -1469,115 +1469,6 @@ class RemotePlayer:
         self.pos[1] += (ty - self.pos[1]) * k
 
 
-def _clear_holly_leg_gap(image: pygame.Surface) -> pygame.Surface:
-    """Clear the narrow white/grey fill between Holly's legs.
-
-    Keeps the white dress (and its blue polka dots) fully opaque, and leaves
-    white socks/shoes alone. Only a tight corridor between the two skin-leg
-    runs, just under the dress hem, is made transparent. Safe to run more
-    than once.
-    """
-    out = image.copy()
-    rgb = pygame.surfarray.pixels3d(out)
-    alpha = pygame.surfarray.pixels_alpha(out)
-    # surfarray is (x, y, ...); work in that layout then write back.
-    r = rgb[..., 0].astype(np.int16)
-    g = rgb[..., 1].astype(np.int16)
-    b = rgb[..., 2].astype(np.int16)
-    a = alpha
-    w, h = out.get_size()
-
-    skin = (
-        (a > 64) & (r > 155) & (g > 85) & (b < 155)
-        & (r > g) & (g > b - 35) & (r - b > 40)
-    )
-    blue_dot = (
-        (a > 64) & (b > r + 12) & (b > g + 8)
-        & (b - ((r + g) // 2) > 15)
-    )
-    light = (
-        (a > 8) & (r > 120) & (g > 120) & (b > 120)
-        & (np.abs(r - g) < 45) & (np.abs(g - b) < 45) & (np.abs(r - b) < 50)
-        & ~skin & ~blue_dot
-    )
-
-    def skin_runs(y):
-        xs = np.where(skin[:, y])[0]
-        if len(xs) < 2:
-            return []
-        runs, start, prev = [], int(xs[0]), int(xs[0])
-        for x in xs[1:]:
-            x = int(x)
-            if x == prev + 1:
-                prev = x
-            else:
-                runs.append((start, prev))
-                start = prev = x
-        runs.append((start, prev))
-        return runs
-
-    hem_y = int(h * 0.68)
-    for y in range(int(h * 0.55), int(h * 0.78)):
-        row = light[:, y]
-        best = cur = 0
-        for x in range(w):
-            if row[x]:
-                cur += 1
-                best = max(best, cur)
-            else:
-                cur = 0
-        if best >= 10:
-            hem_y = y
-
-    gaps = []
-    for y in range(hem_y + 1, int(h * 0.86)):
-        runs = skin_runs(y)
-        if len(runs) < 2:
-            continue
-        le, rs = runs[0][1], runs[-1][0]
-        if 1 <= rs - le - 1 <= 8:
-            gaps.append((y, le, rs))
-    if not gaps:
-        del rgb, alpha
-        return out
-
-    L = int(np.median([g[1] for g in gaps]))
-    R = int(np.median([g[2] for g in gaps]))
-    if R - L - 1 < 1:
-        del rgb, alpha
-        return out
-
-    y0 = max(hem_y, gaps[0][0] - 2)
-    y1 = min(int(h * 0.86), gaps[-1][0] + 1)
-    cleared = np.zeros((w, h), dtype=bool)
-    for y in range(y0, y1 + 1):
-        runs = skin_runs(y)
-        if len(runs) >= 2:
-            le, rs = runs[0][1], runs[-1][0]
-            lo, hi = (le, rs) if 1 <= rs - le - 1 <= 8 else (L, R)
-        else:
-            lo, hi = L, R
-        for x in range(lo + 1, hi):
-            if light[x, y]:
-                cleared[x, y] = True
-
-    for x in range(L + 1, R):
-        if not light[x, hem_y]:
-            continue
-        xl = xr = x
-        while xl > 0 and light[xl - 1, hem_y]:
-            xl -= 1
-        while xr < w - 1 and light[xr + 1, hem_y]:
-            xr += 1
-        if xr - xl + 1 <= 8:
-            cleared[x, hem_y] = True
-
-    alpha[cleared] = 0
-    del rgb, alpha
-    return out
-
-
-
 def _wrap_text(font: pygame.font.Font, text: str, max_width: int) -> list[str]:
     """Greedy word-wrap: break so each line fits max_width pixels."""
     words = text.split()
@@ -1600,18 +1491,11 @@ def _load_char_sprites(files: dict):
     sprites, anchors = {}, {}
     for key, path in files.items():
         image = pygame.image.load(path).convert_alpha()
-        # Holly: clear the tiny white crotch/between-legs gap (dress stays opaque).
-        # Run before and after scale — nearest-neighbour downscale can refill the gap.
-        is_holly = "holly" in os.path.basename(path).lower()
-        if is_holly:
-            image = _clear_holly_leg_gap(image)
         h = image.get_height()
         if h != SPRITE_H:
             w = max(1, round(image.get_width() * SPRITE_H / h))
             # Nearest-neighbour keeps white dress pixels solid (smoothscale muddy them).
             image = _finish_rgba(pygame.transform.scale(image, (w, SPRITE_H)))
-        if is_holly:
-            image = _clear_holly_leg_gap(image)
         sprites[key] = image
         anchors[key] = _feet_anchor(image)
     white = {key: _faded_silhouettes(image, DEATH_FADE_LEVELS) for key, image in sprites.items()}

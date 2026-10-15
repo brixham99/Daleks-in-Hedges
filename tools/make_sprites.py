@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""Build Archie's in-game sprites (assets/archie_{se,sw,nw,ne}.png) from the
-larger source art in tools/art/, with clean antialiased edges.
+"""Build a character's in-game sprites (assets/<name>_{se,sw,nw,ne}.png) from
+the larger source art in tools/art/, with clean antialiased edges.
 
-    python3 tools/make_archie.py
+    python3 tools/make_sprites.py            # archie and holly
+    python3 tools/make_sprites.py holly
+
+Every character's figure is FIGURE_H (68 px, ponytail included) on a 74 px
+canvas, feet PAD_BOTTOM up, so nobody is taller than Archie.
+
+Holly: holly_se_source.png is Nathan's front art cut out with cutout_white.py.
+Her back views are her old pixel-art backs (holly_n?_old.png) with the head
+scaled to the front art's head/body proportions, unless
+tools/art/holly_ne_source.png exists (white backdrop; NW is its mirror).
+No image generator is used for Holly.
 
 - archie_se_source.png: Nathan's 3/4 front view (facing SE). SW is its mirror
   (the hoodie is symmetric enough: central pocket, two drawstrings).
@@ -72,7 +82,57 @@ def to_sprite(img: Image.Image, sharpen: float = 60) -> Image.Image:
     return canvas
 
 
-def main():
+def _neck(a):
+    """(neck row, head width, figure width) of a cropped alpha mask."""
+    a = a > 100
+    w = a.sum(1)
+    lo, hi = int(len(w) * .12), int(len(w) * .4)
+    y = lo + int(np.argmin(w[lo:hi]))
+    return y, int(w[:y].max()), int(w.max())
+
+
+def match_head(back: Image.Image, front: Image.Image) -> Image.Image:
+    """Rescale the head (above the neck) of a pixel-art back view so its
+    height and width relative to the figure match the front art."""
+    back = back.crop(back.split()[3].getbbox())
+    front = front.crop(front.split()[3].getbbox())
+    S = 8
+    big = back.resize((back.width * S, back.height * S), Image.NEAREST)
+    bn, bhw, bfw = _neck(np.asarray(big)[..., 3])
+    fn, fhw, ffw = _neck(np.asarray(front)[..., 3])
+    H = big.height
+    sy = (fn / front.height) / (bn / H)
+    sx = (fhw / ffw) / (bhw / bfw)
+    head, body = big.crop((0, 0, big.width, bn)), big.crop((0, bn, big.width, H))
+    nh = max(1, round(bn * sy))
+    nhw = max(1, round(big.width * sx))
+    head = head.convert("RGBa").resize((nhw, nh), Image.LANCZOS).convert("RGBA")
+    out = Image.new("RGBA", (max(big.width, nhw), nh + body.height), (0, 0, 0, 0))
+    out.alpha_composite(head, ((out.width - nhw) // 2, 0))
+    out.alpha_composite(body, ((out.width - big.width) // 2, nh))
+    return out
+
+
+def make_holly():
+    front = defringe(Image.open(os.path.join(ART, "holly_se_source.png")), white_bg=False)  # cutout_white already removed the white
+    back_src = os.path.join(ART, "holly_ne_source.png")
+    if os.path.exists(back_src):
+        ne = to_sprite(defringe(Image.open(back_src), white_bg=True))
+        nw = ne.transpose(Image.FLIP_LEFT_RIGHT)
+    else:
+        ne, nw = (to_sprite(match_head(defringe(Image.open(os.path.join(ART, f"holly_{k}_old.png")),
+                                                white_bg=False), front), sharpen=0) for k in ("ne", "nw"))
+    se = to_sprite(front)
+    return {"se": se, "sw": se.transpose(Image.FLIP_LEFT_RIGHT), "ne": ne, "nw": nw}
+
+
+def save(name, sprites):
+    for key, img in sprites.items():
+        img.save(os.path.join(OUT, f"{name}_{key}.png"))
+        print(f"{name}_{key}.png  {img.size[0]}x{img.size[1]}  figure {img.getbbox()[3]-img.getbbox()[1]}px")
+
+
+def make_archie():
     # The supplied art is already cut out: its soft edge pixels are the dark
     # outline (measured darker than the figure, not whiter), so no white to remove.
     front = defringe(Image.open(os.path.join(ART, "archie_se_source.png")), white_bg=False)
@@ -84,12 +144,17 @@ def main():
         ne = to_sprite(defringe(Image.open(os.path.join(ART, "archie_ne_old.png")), white_bg=False), sharpen=0)
         nw = to_sprite(defringe(Image.open(os.path.join(ART, "archie_nw_old.png")), white_bg=False), sharpen=0)
     se = to_sprite(front)
-    sprites = {"se": se, "sw": se.transpose(Image.FLIP_LEFT_RIGHT), "ne": ne, "nw": nw}
-    for key, img in sprites.items():
-        path = os.path.join(OUT, f"archie_{key}.png")
-        img.save(path)
-        print(f"archie_{key}.png  {img.size[0]}x{img.size[1]}")
+    return {"se": se, "sw": se.transpose(Image.FLIP_LEFT_RIGHT), "ne": ne, "nw": nw}
+
+
+MAKERS = {"archie": make_archie, "holly": make_holly}
+
+
+def main(argv):
+    for name in argv or list(MAKERS):
+        save(name, MAKERS[name]())
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1:])
