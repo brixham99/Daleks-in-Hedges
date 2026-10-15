@@ -168,6 +168,8 @@ COMPLETE_FADE_OUT_MS = 400
 SOUND_DIR = os.path.join(HERE, "assets", "sounds")
 SOUND_FILES = {
     "ow": "ow.wav",
+    "ow_archie": "ow_archie.wav",   # per-character pitch (tools/make_ow_voices.py)
+    "ow_holly": "ow_holly.wav",
     "exterminate": "exterminate.wav",
     "laser": "laser.wav",
     "step1": "step1.wav",
@@ -181,11 +183,18 @@ SOUND_FILES.update({"rustle": "rustle.wav", "cloak_on": "cloak_on.wav", "cloak_o
 TARDIS_REAL_FILES = ("tardis_real.wav", "tardis_real.ogg", "tardis_real.mp3")
 TARDIS_REAL_VOLUME = 0.7
 SOUND_VOLUME = {
-    "ow": 0.28, "exterminate": 0.9, "laser": 0.7,
+    "ow": 0.28, "ow_archie": 0.28, "ow_holly": 0.28, "exterminate": 0.9, "laser": 0.7,
     "step1": 0.45, "step2": 0.45, "step3": 0.45,
     "rustle": 0.30, "cloak_on": 0.5, "cloak_off": 0.5,
     "tardis_demat": 0.6,
 }
+
+
+def _ow_sound(character: str) -> str:
+    """The bumping character's own "ow" (Archie lower, Holly higher)."""
+    return f"ow_{character}" if f"ow_{character}" in SOUND_FILES else "ow"
+
+
 STEP_SOUNDS = ("step1", "step2", "step3")
 # Ambient Dalek callouts: now and then during play the nearest Dalek says one
 # of these, as loud as its hum would be (HUM_FAR/HUM_NEAR/HUM_CURVE, straight-
@@ -2363,7 +2372,7 @@ class Game:
         if len(self.bump_times) >= OW_BUMPS and now >= self.ow_quiet_until:
             self.bump_times = []
             self.ow_quiet_until = now + OW_QUIET_MS
-            self.sfx.play("ow")
+            self.sfx.play(_ow_sound(self.character))
             self.ow_count += 1         # (sent to the other player in a network game)
         elif now - self.rustle_t >= RUSTLE_GAP_MS:
             self.rustle_t = now
@@ -3927,7 +3936,7 @@ class Game:
         if cloaked and not o.disguised:
             o.disguise_t0 = now
         o.disguised = cloaked
-        for key, name in (("ow", "ow"), ("ru", "rustle")):
+        for key, name in (("ow", _ow_sound(o.character)), ("ru", "rustle")):
             count = int(st.get(key, 0))
             seen = o.sounds_seen.get(key)
             if seen is not None and count > seen:

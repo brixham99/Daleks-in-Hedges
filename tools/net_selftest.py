@@ -345,8 +345,10 @@ for _ in range(G.OW_BUMPS):
     pump([h, j], 120)
 pump([h, j], 400)
 names = [n for n, v in hlog if v is not None]
-check("host hears the joiner's cloak and hedge bumps", "cloak_on" in names and ("rustle" in names or "ow" in names),
+check("host hears the joiner's cloak and hedge bumps", "cloak_on" in names and ("rustle" in names or "ow_holly" in names),
       f"{sorted(set(names))}")
+check("each player's ow is their own voice", "ow_holly" in names and "ow_holly" in [n for n, v in jlog]
+      and not any(n in ("ow", "ow_archie") for n, v in hlog + jlog), f"host {sorted(set(names))}, joiner {sorted(set(n for n, v in jlog))}")
 # Watching: the joiner is exterminated; it still hears Daleks and the host's steps.
 j.toggle_disguise(clock.now())
 pump([h, j], 300)
