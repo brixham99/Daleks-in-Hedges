@@ -255,6 +255,49 @@ pump([h, j], 2000, until=lambda n: h.mode == j.mode == "play")
 check("join by address", h.mode == j.mode == "play" and h.seed == j.seed)
 h._net_close(); j._net_close()
 
+# 7b. After a kill the shooter patrols again, ignores the corpse and can
+# still get the survivor (it used to freeze in its "fire" state for good).
+for victim, port in (("joiner", 47487), ("host", 47488)):
+    h, j = new_pair(port)
+    connect(h, j)
+    pump([h, j], 500)
+    h.survive_ms = j.survive_ms = 5000.0
+    d = h.daleks[0]
+    now = clock.now()
+    d.state, d.fire_t0 = "fire", now
+    if victim == "joiner":
+        h._net_kill_other(now, d)
+    else:
+        h._kill(now, d)
+    start = tuple(d.pos)
+    moved = pump([h, j], 2000 + G.DALEK_RECOVER_MS,
+                 until=lambda n: abs(d.pos[0] - start[0]) + abs(d.pos[1] - start[1]) >= 1.0)
+    jd = j.daleks[0]
+    check(f"{victim} shot: the Dalek patrols again on both sides", moved and d.state == "roam" and jd.state == "roam",
+          f"host {d.state}, joiner {jd.state}, moved {abs(d.pos[0] - start[0]) + abs(d.pos[1] - start[1]):.1f} cells")
+    if victim == "joiner":
+        shot(h, "lan_after_kill.png")
+    # The same Dalek can still see and shoot the survivor.
+    survivor = h if victim == "joiner" else j
+    d_dir, run = corridor(h, 5)
+    if victim == "joiner":
+        h._place_archie(run[-1], (-d_dir[0], -d_dir[1]))
+    else:
+        teleport(j, h, run[-1], (-d_dir[0], -d_dir[1]))
+    for o in h.daleks[1:]:
+        o.pos = [float(G.MAZE_SIZE // 2), float(G.MAZE_SIZE // 2)]
+        o.target = (G.MAZE_SIZE // 2, G.MAZE_SIZE // 2)
+        o.state, o.wait_until = "roam", clock.now() + 1e5
+    h.daleks = [d] + [o for o in h.daleks[1:] if o.cell() not in run]
+    d.pos, d.target = [float(run[0][0]), float(run[0][1])], run[0]
+    d.facing = d.prev_facing = d_dir
+    d.state, d.wait_until = "roam", clock.now() + 1e5
+    pump([h, j], 3000, until=lambda n: survivor.dead)
+    pump([h, j], 600)                         # the game-over event goes round
+    check(f"{victim} shot: that Dalek can still get the survivor", survivor.dead and h.net_over and j.net_over,
+          f"dead {survivor.dead}, over {h.net_over}/{j.net_over}, dalek {d.state} at {d.cell()} facing {d.facing}, run {run[0]}->{run[-1]}, survivor at {(survivor.col, survivor.row)} disguised {survivor.disguised} won {survivor.won}")
+    h._net_close(); j._net_close()
+
 # 8. Transport: reliable events under heavy loss, stale states dropped.
 a = net.Link("host", port=47485)
 b = net.Link("join", peer=("127.0.0.1", 47485))

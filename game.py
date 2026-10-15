@@ -264,6 +264,7 @@ NET_WATCH_PAN_MS = 600         # camera glide to the player you are watching
 NET_NOTICE_MS = 3500           # "Connection lost" stays up this long
 NET_JOIN_WAIT_S = 6.0          # no answer from a host in this long: back to the list
 DALEK_STATES = ("roam", "aim", "fire")
+DALEK_RECOVER_MS = 1200        # network game: after a kill the shooter patrols again (the other player lives on)
 
 KEY_ACTIONS = {
     pygame.K_LEFT: ("turn", -1),
@@ -2029,8 +2030,13 @@ class Game:
         blocks a Dalek's way; an exposed one is a target."""
         players = [("me", self._archie_cells(), self.archie_exposed())]
         o = self.other
-        if self.net is not None and o is not None and self.mode == "play" and not o.in_tardis:
-            players.append(("other", o.cells(), o.exposed()))
+        if self.net is not None:
+            # The fallen are gone from the maze: no target, and no wall either,
+            # so a corridor with a scorch mark in it stays open to the Daleks.
+            if self.dead:
+                players = []
+            if o is not None and self.mode == "play" and not o.in_tardis and not o.dead:
+                players.append(("other", o.cells(), o.exposed()))
         return players
 
     def _sees(self, d: Dalek):
@@ -2091,7 +2097,12 @@ class Game:
     def _update_daleks(self, now: float, dt: float):
         for d in self.daleks:
             if d.state == "fire":
-                continue
+                # Single player: the game is over. A network game goes on for
+                # the survivor, so the shooter lowers its gun and patrols again.
+                if self.net is None or now - d.fire_t0 < DALEK_RECOVER_MS:
+                    continue
+                d.state = "roam"
+                d.wait_until = now + DALEK_TURN_MS
             if d.state == "aim":
                 who = self._sees(d)
                 if who is None:
