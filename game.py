@@ -285,6 +285,14 @@ DALEK_STATES = ("roam", "aim", "fire")
 REMOTE_SOUND_GAIN = 0.7       # the other player's steps, bumps and cloak: a bit quieter than yours
 DALEK_RECOVER_MS = 1200        # network game: after a kill the shooter patrols again (the other player lives on)
 
+# Secret: hold S and O together for over 2 s in play and the maze fills to 30
+# Daleks (once per hold). A challenge only: scoring is unchanged. In a network
+# game the host spawns them (a joiner's hold is sent as a "swarm" event).
+SECRET_HOLD_MS = 2000
+SECRET_DALEKS = 30
+SECRET_CUE = "dalek_find_the_human"
+SECRET_CUE_VOL = 0.35          # a subtle cue, not a full-volume shout
+
 KEY_ACTIONS = {
     pygame.K_LEFT: ("turn", -1),
     pygame.K_a: ("turn", -1),
@@ -2467,6 +2475,71 @@ class Game:
         self.wish = action
         self.try_action(action, now)
 
+    def secret_keys(self, keys, now: float):
+        """S+O held together for over SECRET_HOLD_MS: fill the maze with Daleks.
+        Fires once per hold; both keys must be let go (either) to arm it again."""
+        held = self.mode == "play" and keys[pygame.K_s] and keys[pygame.K_o]
+        if not held:
+            self.so_t0, self.so_fired = None, False
+            return
+        if getattr(self, "so_fired", False):
+            return
+        if getattr(self, "so_t0", None) is None:
+            self.so_t0 = now
+            return
+        if now - self.so_t0 > SECRET_HOLD_MS:
+            self.so_fired = True
+            if self.net is not None and self.net_role == "join":
+                self.net.send_event("swarm")      # the host owns the Daleks
+                self.sfx.play_voice(SECRET_CUE, SECRET_CUE_VOL, SECRET_CUE_VOL)
+            elif self.swarm():
+                self.sfx.play_voice(SECRET_CUE, SECRET_CUE_VOL, SECRET_CUE_VOL)
+
+    def swarm(self, total: int = SECRET_DALEKS) -> int:
+        """Add Daleks up to `total` with the normal spawn rules: corridor cells,
+        never in the Dalek-free start area (or the network safe zone), and not
+        on or next to a player or another Dalek. Returns how many were added."""
+        if self.mode != "play" or len(self.daleks) >= total:
+            return 0
+        rng = random.Random((self.seed * 7919 + len(self.daleks) * 104729 + 99) & 0xFFFFFFFF)
+        from_start = self._path_dist(self.start_cell)
+        players = set(self._archie_cells())
+        o = getattr(self, "other", None)
+        if self.net is not None and o is not None:
+            players |= {tuple(o.cell), tuple(o.dst)}
+        taken = {d.cell() for d in self.daleks} | {d.target for d in self.daleks if d.target}
+
+        def ok(cell, k):
+            c, r = cell
+            return (from_start.get(cell, 0) >= DALEK_MIN_START_DIST * k
+                    and self.grid[r][c] == PATH
+                    and cell not in (self.start_cell, self.demat_cell, self.exit_cell)
+                    and cell not in self.safe_cells
+                    and all(abs(c - p[0]) + abs(r - p[1]) > 2 for p in players))
+        cands = []
+        for k in (1.0, 0.75, 0.5):
+            cands = sorted(cell for cell in from_start if ok(cell, k) and cell not in taken)
+            if len(cands) >= total - len(self.daleks):
+                break
+        added = 0
+        while len(self.daleks) < total and cands:
+            pool = []
+            for gap in DALEK_SPACING:
+                pool = [x for x in cands if all(abs(x[0] - t[0]) + abs(x[1] - t[1]) >= gap for t in taken)]
+                if pool:
+                    break
+            if not pool:
+                break
+            c, r = rng.choice(pool)
+            cands.remove((c, r))
+            taken.add((c, r))
+            dirs = [d for d in DIR_ORDER if self.is_open(c + d[0], r + d[1])]
+            i = len(self.daleks)
+            self.daleks.append(Dalek(c, r, rng.choice(dirs) if dirs else DIR_SE,
+                                     random.Random(self.seed * 31 + i * 1009 + 7)))
+            added += 1
+        return added
+
     def hold_action(self, keys, now: float):
         if self.mode != "play" or self.busy() or self.won or self.dead or self.disguised or self.card_t0 is not None:
             return
@@ -4017,6 +4090,8 @@ class Game:
             o.dead = False
             o.in_tardis = True
             self._net_arrival("join", now)
+        elif kind == "swarm" and self.net_role == "host":   # the joiner held S+O
+            self.swarm()
         elif kind == "bonus":      # (joiner) first into the TARDIS
             self._net_bonus(now)
         elif kind == "first":      # (joiner) the host got there first
@@ -4424,7 +4499,9 @@ def main(argv=None):
                         game.on_key(event.key, now, getattr(event, "unicode", ""))
             if not running:
                 break
-            game.hold_action(pygame.key.get_pressed(), now)
+            keys = pygame.key.get_pressed()
+            game.secret_keys(keys, now)
+            game.hold_action(keys, now)
             game.update(now)
             game.draw(screen, now)
             pygame.display.flip()

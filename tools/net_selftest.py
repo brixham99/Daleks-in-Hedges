@@ -411,6 +411,52 @@ time.sleep(0.05); a.poll()
 check("out-of-order state packets are dropped", a.state == {"x": 10} and a.stats["stale"] == 1)
 a.close(); b.close()
 
+# 9. Secret S+O: over 2 s held fills the maze to 30 Daleks, once per hold.
+class Keys(dict):
+    def __getitem__(self, k):
+        return self.get(k, False)
+
+
+SO, NONE = Keys({pygame.K_s: True, pygame.K_o: True}), Keys()
+g = G.Game(5, title=False, online=False)
+n0, score0 = len(g.daleks), g.score
+g.secret_keys(SO, 0.0); g.secret_keys(SO, 1900.0)
+early = len(g.daleks)
+g.secret_keys(SO, 2100.0)
+cells = [d.cell() for d in g.daleks]
+near = [c for c in cells if abs(c[0] - g.col) + abs(c[1] - g.row) <= 2]
+dist = g._path_dist(g.start_cell)
+in_start = [c for c in cells[n0:] if dist.get(c, 0) < G.DALEK_MIN_START_DIST * 0.5]
+check("S+O for 2 s: 30 Daleks, rules kept, score unchanged",
+      early == n0 and len(g.daleks) == 30 and len(set(cells)) == 30 and not near and not in_start
+      and all(g.grid[c[1]][c[0]] == G.PATH for c in cells) and g.score == score0,
+      f"{n0} -> {early} at 1.9 s -> {len(g.daleks)}, next to player {near}, in start area {in_start}")
+g.daleks = g.daleks[:10]
+g.secret_keys(SO, 4000.0)
+again = len(g.daleks)
+g.secret_keys(NONE, 4100.0); g.secret_keys(SO, 4200.0); g.secret_keys(SO, 6300.0)
+check("S+O fires once per hold", again == 10 and len(g.daleks) == 30, f"held on: {again}, after release: {len(g.daleks)}")
+t = time.perf_counter()
+for i in range(120):
+    g.update(7000.0 + i * 16.7)
+ms = (time.perf_counter() - t) * 1000 / 120
+check("30 Daleks: update stays fast, only the hum channels hum", ms < 8 and G.HUM_CHANNELS <= 4, f"{ms:.2f} ms per frame")
+
+h, j = new_pair(47494)
+connect(h, j)
+pump([h, j], 300)
+j.secret_keys(SO, clock.now())
+pump([h, j], 2200, each=lambda n: j.secret_keys(SO, n))
+pump([h, j], 800, until=lambda n: len(j.daleks) == 30)
+check("LAN: joiner's S+O makes the host spawn 30, synced to the joiner",
+      len(h.daleks) == 30 and len(j.daleks) == 30
+      and all(abs(a.pos[0] - b.pos[0]) + abs(a.pos[1] - b.pos[1]) < 1.5 for a, b in zip(h.daleks, j.daleks)),
+      f"host {len(h.daleks)}, joiner {len(j.daleks)}")
+shot(h, "so_30.png")
+if not SHOTS:
+    h.draw(screen, clock.now()); pygame.image.save(screen, os.path.join(tempfile.gettempdir(), "so_30.png"))
+h._net_close(); j._net_close()
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 pygame.quit()
