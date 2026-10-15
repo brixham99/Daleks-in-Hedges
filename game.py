@@ -4265,7 +4265,7 @@ class Game:
         mute = "M unmute" if self.sfx.muted else "M mute"
         lines = [
             "Left/Right or A/D (or 1/2): choose character",
-            "Enter / Space: start    N: two players on a network",
+            "Enter / Space: start    N: Two players on a network",
             "In game: Left/Right turn, Up/Down step, H Chameleon Cloak, " + mute,
         ]
         # Copyright at the very bottom (wrapped); controls sit just above it.
