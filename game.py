@@ -3439,7 +3439,7 @@ class Game:
         screen.blit(box, (self.view_w - box.get_width() - 8, 8))
 
     def _draw_level_hud(self, screen):
-        text = self.font_hud.render(f"Level {self.level}    Daleks: {len(self.daleks)}", True, (240, 234, 214))
+        text = self.font_score.render(f"Level: {self.level}    Daleks: {len(self.daleks)}", True, (240, 234, 214))
         pad_x, pad_y = 8, 5
         box = _new_rgba((text.get_width() + pad_x * 2, text.get_height() + pad_y * 2))
         box.fill((36, 24, 16, 180))
@@ -3470,7 +3470,7 @@ class Game:
             y = pad_y + i * line
             box.blit(l, (pad_x, y))
             box.blit(v, (w - pad_x - v.get_width(), y))
-        y0 = 8 + self.font_hud.get_height() + 10 + 4  # just under the level box
+        y0 = 8 + self.font_score.get_height() + 10 + 4  # just under the level box
         screen.blit(_finish_rgba(box), (8, y0))
         if self.other is not None:
             o = self.other
