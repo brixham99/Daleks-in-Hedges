@@ -46,12 +46,16 @@ Some Wi-Fi networks (guest, school or office networks) block broadcasts, so the 
 
 ## Controls
 
+The game runs at 1280×720 in a window that you can resize; press **F** for full screen, or start full screen with `python3 game.py --fullscreen`.
+
+
 | Key | Action |
 | --- | --- |
 | Left / Right or A / D | Turn |
 | Up / W | Step forward |
 | Down / S | Step back |
 | H or Shift | Chameleon Cloak (press again to stop early) |
+| F | Full screen on / off (not while typing a name) |
 | Esc | Quit |
 | Title screen: Left / Right, A / D or 1 / 2 | Choose a character |
 | Title screen: Enter or Space | Start |
@@ -66,7 +70,7 @@ Some Wi-Fi networks (guest, school or office networks) block broadcasts, so the 
 
 When you are exterminated, type a name (up to 8 letters, digits or spaces) and press Enter to post it, or Esc to skip. The online Top 10 keeps one best score per name: <http://dreamlo.com/lb/6ac7b3018f40bc15a8400bbc/json>
 
-When you post a score, the game looks up your country (from ipinfo.io, or ipapi.co if that fails) and the Top 10 shows its flag, downloaded once from flagcdn.com into `~/.daleks_in_hedges/flags/`. Older scores have no flag.
+When you post a score, the game looks up your country (from ipinfo.io, or ipapi.co if that fails) and the Top 10 shows its flag, downloaded once from flagcdn.com into `~/.daleks_in_hedges/flags40/`. Older scores have no flag.
 
 Offline, the game shows the last cached Top 10 and sends unsent scores later. The cache, your last name and your best score are in `~/.daleks_in_hedges/scores.json`.
 

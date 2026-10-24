@@ -36,19 +36,22 @@ import net
 # Classic 2:1 isometric projection. (tx, ty) is the top vertex of a tile.
 #   screen_x = (col - row) * (TILE_W // 2)
 #   screen_y = (col + row) * (TILE_H // 2)
-TILE_W = 64
-TILE_H = 32
-HEDGE_H = 40
-SPRITE_H = 74
+# PX: everything is drawn at the full 1280x720 resolution, at twice the
+# pixel sizes of the old 640x360-style view (which was nearest-scaled 2x).
+PX = 2
+TILE_W = 64 * PX
+TILE_H = 32 * PX
+HEDGE_H = 40 * PX
+SPRITE_H = 74 * PX            # Archie/Holly height on screen (the Haunted Mansion art, scaled)
 MOVE_MS = 150
 TURN_MS = 220
 BUMP_MS = 110
-WIN_W = 1100
+WIN_W = 1280
 WIN_H = 720
-# The world (maze, dirt, Archie) is drawn to a smaller internal surface and
-# scaled up to the window, so everything grows together. The HUD (hint,
-# minimap, win panel) is drawn afterwards at full window resolution.
-ZOOM = 2.0
+# World, effects and HUD are all drawn straight at the window's 1280x720
+# (pygame.SCALED fits that to the window or full screen). ZOOM stays for
+# experiments: above 1 the view is drawn smaller and scaled up.
+ZOOM = 1.0
 ZOOM_SMOOTH = False  # True: smoothscale; False: nearest-neighbour scale
 MAZE_SIZE = 41  # odd, so a perfect maze has a solid border
 WALL, PATH, EXIT = 0, 1, 2
@@ -74,17 +77,17 @@ N_DIRT = 16
 DIRT_SHADES = (0.90, 0.97, 1.03)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Four facing sprites per character (same keys FACING_SPRITE uses).
+# Archie and Holly are the Haunted Mansion figures (assets/characters, made
+# there by tools/make_walk.py): a standing frame and an 8-frame walk cycle for
+# each of the four facings (same keys FACING_SPRITE uses), plus metadata with
+# the ground anchor and where each foot is in every frame.
+CHAR_DIR = os.path.join(HERE, "assets", "characters")
 CHARACTERS = {
-    "archie": {
-        "name": "Archie",
-        "files": {k: os.path.join(HERE, "assets", f"archie_{k}.png") for k in ("se", "sw", "nw", "ne")},
-    },
-    "holly": {
-        "name": "Holly",
-        "files": {k: os.path.join(HERE, "assets", f"holly_{k}.png") for k in ("se", "sw", "nw", "ne")},
-    },
+    "archie": {"name": "Archie"},
+    "holly": {"name": "Holly"},
 }
+WALK_START = 0.2              # a fresh walk starts just before the feet pass (as in Haunted Mansion)
+WALK_IDLE_MS = 90             # stopped this long: back to the standing frame and WALK_START
 CHAR_ORDER = ("archie", "holly")
 TITLE_DALEKS = 10             # decorative Daleks on the title screen
 
@@ -94,8 +97,8 @@ LAMP_GLOW_FILE = os.path.join(HERE, "assets", "fx", "lamp_glow.png")  # tools/ma
 CLOAK_FILE = os.path.join(HERE, "assets", "fx", "chameleon_cloak.png")
 
 # --- Daleks, the TARDIS and the Chameleon Cloak (pre-zoom pixels, ms) ---
-DALEK_H = 86                 # Archie is SPRITE_H = 74
-TARDIS_H = 124
+DALEK_H = 86 * PX                # Archie is SPRITE_H = 74
+TARDIS_H = 124 * PX
 NUM_DALEKS = 3               # on level 1; each level adds two more ...
 DALEKS_PER_LEVEL = 2
 MAX_DALEKS = 15              # ... up to this many (the 41x41 maze stays fair)
@@ -106,7 +109,7 @@ DALEK_TELEGRAPH_MS = 350     # eye-stalk glow before the shot
 DALEK_MIN_START_DIST = 12    # path distance from Archie's start
 DALEK_MIN_EXIT_DIST = 10     # path distance from the exit
 LASER_MS = 450               # how long the beam stays on screen
-LASER_WIDTHS = (4, 3, 2, 1)  # px on the low-res view (nearest-neighbour 2x to the window)
+LASER_WIDTHS = (8, 6, 4, 2)  # px at 1280x720
 LASER_COLOURS = ((30, 70, 190), (70, 140, 250), (160, 210, 255), (255, 255, 255))
 LASER_HOT = ((40, 95, 225), (110, 175, 255), (200, 232, 255), (255, 255, 255))  # flicker frames
 LASER_TIP_GLOW = ((70, 140, 250), (170, 220, 255), (255, 255, 255))  # solid circles, outside in
@@ -158,7 +161,7 @@ CARD_FADE_MS = 450           # fade to black, the new maze is made ...
 CARD_HOLD_MS = 1000          # ... "Level N" on black ...
 LEVEL_BANNER_MS = 2600       # "Level N" banner at the start of a level
 COMPLETE_TEXT = "Level complete!"
-COMPLETE_SIZE = 20           # plain white text on the low-res view (chunky when 2x scaled)
+COMPLETE_SIZE = 20           # plain white text (font points before PX)
 COMPLETE_Y = 0.2             # its top, as a fraction of the window height (clear of the TARDIS)
 COMPLETE_FADE_IN_MS = 300
 COMPLETE_FADE_OUT_MS = 400
@@ -266,10 +269,10 @@ DREAMLO_PRIVATE = "ywhrA7pmp0ivMlVZTqZoTwfNbQztSs2kSLvG6ZGQ53OQ"
 DREAMLO_URL = "http://dreamlo.com/lb/"
 DREAMLO_TIMEOUT = 4.0        # seconds; every request runs on a background thread
 SAVE_DIR = os.path.join(os.path.expanduser("~"), ".daleks_in_hedges")
-FLAG_DIR = os.path.join(SAVE_DIR, "flags")  # flag images, downloaded once each
+FLAG_DIR = os.path.join(SAVE_DIR, "flags40")  # flag images (40x20), downloaded once each
 COUNTRY_URLS = ("https://ipinfo.io/country", "https://ipapi.co/country/")  # no key; first that answers
 COUNTRY_TIMEOUT = 2.0
-FLAG_URL = "https://flagcdn.com/w20/{code}.png"  # 20x10 PNG: one low-res row tall
+FLAG_URL = "https://flagcdn.com/w40/{code}.png"  # 40x20 PNG: one Top 10 row tall
 FLAG_TIMEOUT = 3.0
 SAVE_FILE = os.path.join(SAVE_DIR, "scores.json")  # last name, local best, cached Top 10, unsent scores
 
@@ -383,6 +386,8 @@ def generate_maze(size: int, seed: int):
 
 
 def load_font(size: int, bold: bool = False) -> pygame.font.Font:
+    """Sizes are given as on the old low-res view; they are drawn PX times larger."""
+    size = int(round(size * PX))
     try:
         font = pygame.font.SysFont("dejavusans", size, bold=bold)
         if font is not None:
@@ -413,7 +418,7 @@ def _tileable_noise(size: int, cells: int, rng: np.random.Generator) -> np.ndarr
     return top * (1.0 - yf)[:, None] + bot * yf[:, None]
 
 
-def make_dirt_texture(size: int = 160) -> pygame.Surface:
+def make_dirt_texture(size: int = 160 * PX) -> pygame.Surface:
     """One tileable mottled-soil texture: browns, clumps, pebbles, specks."""
     rng = np.random.default_rng(7)
     n1 = _tileable_noise(size, 6, rng)
@@ -432,7 +437,7 @@ def make_dirt_texture(size: int = 160) -> pygame.Surface:
     soil = np.array([58, 36, 22], dtype=np.float32)
     colour = colour * (1.0 - 0.45 * damp) + soil * (0.45 * damp)
     img = np.clip(colour, 0, 255).astype(np.uint8)
-    for _ in range(220):
+    for _ in range(220 * PX * PX):
         x = int(rng.integers(0, size))
         y = int(rng.integers(0, size))
         if rng.random() < 0.55:
@@ -441,14 +446,14 @@ def make_dirt_texture(size: int = 160) -> pygame.Surface:
                 int(rng.integers(102, 140)),
                 int(rng.integers(88, 120)),
             )
-            rad = 1 if rng.random() < 0.75 else 2
+            rad = (1 if rng.random() < 0.75 else 2) * PX
         else:
             tint = (
                 int(rng.integers(70, 120)),
                 int(rng.integers(46, 78)),
                 int(rng.integers(28, 48)),
             )
-            rad = 0
+            rad = PX // 2
         for dy in range(-rad, rad + 1):
             for dx in range(-rad, rad + 1):
                 if dx * dx + dy * dy > rad * rad:
@@ -456,8 +461,8 @@ def make_dirt_texture(size: int = 160) -> pygame.Surface:
                 img[(y + dy) % size, (x + dx) % size] = tint
     # Fine specks, wrapping so the texture still tiles.
     speck = rng.random((size, size))
-    hi = speck > 0.992
-    lo = (speck > 0.984) & ~hi
+    hi = speck > 1.0 - 0.008 / PX
+    lo = (speck > 1.0 - 0.016 / PX) & ~hi
     img[hi] = np.array([186, 154, 110], dtype=np.uint8)
     img[lo] = np.array([64, 42, 28], dtype=np.uint8)
     surf = pygame.surfarray.make_surface(np.transpose(img, (1, 0, 2)))
@@ -480,15 +485,15 @@ def _feet_anchor(image: pygame.Surface):
 def build_dirt_variants(texture: pygame.Surface):
     """Clip the dirt texture into diamond tiles with varied sample offsets."""
     tw, th = texture.get_size()
-    sw, sh = 72, 40
+    sw, sh = 72 * PX, 40 * PX
     cx, cy = sw / 2, sh / 2
     hw = TILE_W // 2
     hh = TILE_H // 2
     raw = (
-        (cx, cy - hh - 1),
-        (cx + hw + 1, cy),
-        (cx, cy + hh + 1),
-        (cx - hw - 1, cy),
+        (cx, cy - hh - PX),
+        (cx + hw + PX, cy),
+        (cx, cy + hh + PX),
+        (cx - hw - PX, cy),
     )
 
     def grow(points, amount):
@@ -499,7 +504,7 @@ def build_dirt_variants(texture: pygame.Surface):
             out.append((x + dx / length * amount, y + dy / length * amount))
         return out
 
-    fill_pts = grow(raw, 1.6)
+    fill_pts = grow(raw, 1.6 * PX)
     mask = _new_rgba((sw, sh))
     pygame.draw.polygon(mask, (255, 255, 255, 255), fill_pts)
     mask_alpha = pygame.surfarray.array_alpha(mask)
@@ -518,7 +523,7 @@ def build_dirt_variants(texture: pygame.Surface):
         alpha = pygame.surfarray.pixels_alpha(base)
         alpha[:] = mask_alpha
         del alpha
-        pygame.draw.polygon(base, DIRT_EDGE, raw, 1)
+        pygame.draw.polygon(base, DIRT_EDGE, raw, PX)
         shades = []
         for factor in DIRT_SHADES:
             shaded = base.copy()
@@ -534,14 +539,18 @@ N_HEDGE = 16
 N_HEDGE_SHADES = 8
 HEDGE_FOG_LO = 0.88  # same range as Game._fog
 HEDGE_FOG_HI = 1.02
-HEDGE_PAD_X = 6
-HEDGE_PAD_TOP = 9
-HEDGE_PAD_BOT = 4
+HEDGE_PAD_X = 6 * PX
+HEDGE_PAD_TOP = 9 * PX
+HEDGE_PAD_BOT = 4 * PX
 HEDGE_SW = TILE_W + 2 * HEDGE_PAD_X
 HEDGE_SH = HEDGE_PAD_TOP + HEDGE_H + TILE_H + HEDGE_PAD_BOT
 HEDGE_OX = HEDGE_PAD_X + TILE_W // 2          # sprite x of the tile's top vertex
 HEDGE_OY = HEDGE_PAD_TOP + HEDGE_H            # sprite y of the tile's top vertex
-_SIDE = 32.0                                   # world units along one tile edge
+# Leaves at full resolution: a bit smaller than a straight 2x and more of
+# them, so the hedges gain detail rather than just getting bigger.
+LEAF_SCALE = 1.5
+LEAF_DENSITY = (PX / LEAF_SCALE) ** 2
+_SIDE = 32.0 * PX                              # world units along one tile edge (1 unit = 1 px)
 
 # View-space normals (x right, y down, z toward the viewer) and the light.
 _N_TOP = np.array([0.0, -0.866, 0.5])
@@ -559,10 +568,10 @@ def _project(u, v, w):
 
 
 def _mounds(rng, count, amp):
-    cu = rng.uniform(-4, _SIDE + 4, count)
-    cv = rng.uniform(-4, _SIDE + 4, count)
-    sig = rng.uniform(5.0, 10.0, count)
-    a = rng.uniform(-0.4, 1.0, count) * amp
+    cu = rng.uniform(-4 * PX, _SIDE + 4 * PX, count)
+    cv = rng.uniform(-4 * PX, _SIDE + 4 * PX, count)
+    sig = rng.uniform(5.0, 10.0, count) * PX
+    a = rng.uniform(-0.4, 1.0, count) * amp * PX
 
     def field(u, v):
         out = np.zeros_like(u)
@@ -593,18 +602,19 @@ def render_hedge_variant(index: int, seed: int = 4242) -> np.ndarray:
     leaves = []  # (u, v, w, face, offset)
 
     def add(face, n):
-        o = rng.uniform(-2.8, 1.6, n)
+        n = int(round(n * LEAF_DENSITY))
+        o = rng.uniform(-2.8, 1.6, n) * PX
         if face == 0:     # top: plane w = HEDGE_H
-            u = rng.uniform(-1.2, _SIDE + 1.2, n)
-            v = rng.uniform(-1.2, _SIDE + 1.2, n)
+            u = rng.uniform(-1.2 * PX, _SIDE + 1.2 * PX, n)
+            v = rng.uniform(-1.2 * PX, _SIDE + 1.2 * PX, n)
             w = HEDGE_H + top_bump(u, v) + o
         elif face == 1:   # left (SW) face: plane v = SIDE
-            u = rng.uniform(-0.8, _SIDE + 0.8, n)
-            w = rng.uniform(-1.0, HEDGE_H + 0.5, n)
+            u = rng.uniform(-0.8 * PX, _SIDE + 0.8 * PX, n)
+            w = rng.uniform(-1.0 * PX, HEDGE_H + 0.5 * PX, n)
             v = _SIDE + left_bump(u, w) * 0.7 + o * 0.8
         else:             # right (SE) face: plane u = SIDE
-            v = rng.uniform(-0.8, _SIDE + 0.8, n)
-            w = rng.uniform(-1.0, HEDGE_H + 0.5, n)
+            v = rng.uniform(-0.8 * PX, _SIDE + 0.8 * PX, n)
+            w = rng.uniform(-1.0 * PX, HEDGE_H + 0.5 * PX, n)
             u = _SIDE + right_bump(v, w) * 0.7 + o * 0.8
         leaves.append((u, v, w, np.full(n, face), o))
 
@@ -620,7 +630,7 @@ def render_hedge_variant(index: int, seed: int = 4242) -> np.ndarray:
     sx, sy, depth = _project(u, v, w)
 
     # Leaf ellipse shape.
-    a = rng.uniform(1.7, 3.1, n)
+    a = rng.uniform(1.7, 3.1, n) * LEAF_SCALE
     b = a * rng.uniform(0.45, 0.75, n)
     th = rng.uniform(0, math.pi, n)
     # Leaves on the side faces hang a little more vertically.
@@ -628,7 +638,7 @@ def render_hedge_variant(index: int, seed: int = 4242) -> np.ndarray:
     th[side] = rng.normal(math.pi / 2, 0.6, side.sum())
     ct, st = np.cos(th), np.sin(th)
 
-    R = 4
+    R = int(math.ceil(3.1 * LEAF_SCALE)) + 1
     dy, dx = np.mgrid[-R:R + 1, -R:R + 1]
     dx = dx.ravel()[None, :]
     dy = dy.ravel()[None, :]
@@ -662,8 +672,8 @@ def render_hedge_variant(index: int, seed: int = 4242) -> np.ndarray:
     # Leaf colour.
     t = np.clip(rng.beta(2.2, 2.0, n), 0, 1)
     face_gain = np.where(face == 0, 1.04, np.where(face == 1, 0.70, 0.84))
-    ao = 0.55 + 0.45 * np.clip((off + 2.8) / 4.4, 0, 1)
-    ground = np.where(face > 0, 0.55 + 0.45 * np.clip(w / 16.0, 0, 1), 1.0)
+    ao = 0.55 + 0.45 * np.clip((off / PX + 2.8) / 4.4, 0, 1)
+    ground = np.where(face > 0, 0.55 + 0.45 * np.clip(w / (16.0 * PX), 0, 1), 1.0)
     jitter = rng.uniform(0.9, 1.1, n)
     base = leaf_dark[None, :] * (1 - t[:, None]) + leaf_light[None, :] * t[:, None]
     # A few young, yellow-green leaves on top.
@@ -1184,9 +1194,9 @@ class Flags:
         if os.path.exists(path):
             try:
                 raw = pygame.image.load(path)
-                h = 10
+                h = 10 * PX
                 w = max(1, int(round(raw.get_width() * h / raw.get_height())))
-                img = pygame.transform.scale(raw, (w, h)).convert()  # nearest: keeps the pixel look
+                img = pygame.transform.smoothscale(raw.convert(), (w, h))
             except Exception:
                 img = None
         with self.lock:
@@ -1492,20 +1502,54 @@ def _wrap_text(font: pygame.font.Font, text: str, max_width: int) -> list[str]:
     return lines
 
 
-def _load_char_sprites(files: dict):
-    """Scale a character's facing PNGs to SPRITE_H and return (sprites, anchors, white)."""
-    sprites, anchors = {}, {}
-    for key, path in files.items():
-        image = pygame.image.load(path).convert_alpha()
-        h = image.get_height()
-        if h != SPRITE_H:
-            w = max(1, round(image.get_width() * SPRITE_H / h))
-            # Nearest-neighbour keeps white dress pixels solid (smoothscale muddy them).
-            image = _finish_rgba(pygame.transform.scale(image, (w, SPRITE_H)))
-        sprites[key] = image
-        anchors[key] = _feet_anchor(image)
-    white = {key: _faded_silhouettes(image, DEATH_FADE_LEVELS) for key, image in sprites.items()}
-    return sprites, anchors, white
+def _load_char_set(cid: str):
+    """A character's standing frames, walk cycles and foot metadata, scaled
+    (smoothly, down from the larger Haunted Mansion art) to SPRITE_H."""
+    with open(os.path.join(CHAR_DIR, f"{cid}_walk.json")) as f:
+        meta = json.load(f)
+    fw, fh = meta["size"]
+    k = SPRITE_H / fh
+    size = (max(1, round(fw * k)), SPRITE_H)
+
+    def scaled(img):
+        return _finish_rgba(pygame.transform.smoothscale(img.convert_alpha(), size))
+
+    def foot(d):
+        return {"x": d["x"] * k, "y": d["y"] * k, "lift": d["lift"] * k, "down": d["down"]}
+
+    stand, walk, anchors, feet, rest = {}, {}, {}, {}, {}
+    for key in ("se", "sw", "nw", "ne"):
+        stand[key] = scaled(pygame.image.load(os.path.join(CHAR_DIR, f"{cid}_{key}.png")))
+        sheet = pygame.image.load(os.path.join(CHAR_DIR, f"{cid}_{key}_walk.png"))
+        walk[key] = [scaled(sheet.subsurface((i * fw, 0, fw, fh))) for i in range(meta["frames"])]
+        fm = meta["facings"][key]
+        anchors[key] = (fm["anchor"][0] * k, fm["anchor"][1] * k)
+        feet[key] = [{leg: foot(v) for leg, v in fr.items()} for fr in fm["feet"]]
+        rest[key] = {leg: foot(v) for leg, v in fm.get("rest", fm["feet"][0]).items()}
+    white = {key: _faded_silhouettes(img, DEATH_FADE_LEVELS) for key, img in stand.items()}
+    # One walk cycle covers cycle_tiles Haunted Mansion tiles (112 px wide) at
+    # the art's own size; here the figure is k times that, on TILE_W tiles.
+    cycle_cells = meta["cycle_tiles"] * 112 * k / TILE_W
+    return {"sprites": stand, "walk": walk, "anchors": anchors, "feet": feet, "rest": rest,
+            "white": white, "frames": meta["frames"], "cycle_cells": cycle_cells, "k": k}
+
+
+_SOFT_SHADOWS = {}
+
+
+def soft_shadow(rw: float, rh: float, alpha: float) -> pygame.Surface:
+    """A soft-edged dark ellipse (radii rw x rh), cached (as in Haunted Mansion)."""
+    key = (int(rw), int(rh), int(alpha))
+    if key not in _SOFT_SHADOWS:
+        w, h = max(2, key[0] * 2 + 2), max(2, key[1] * 2 + 2)
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        d = np.sqrt(((xx + 0.5 - w / 2) / max(1, key[0])) ** 2 + ((yy + 0.5 - h / 2) / max(1, key[1])) ** 2)
+        a = np.clip((1.0 - d) / 0.45, 0, 1)
+        a = a * a * (3 - 2 * a) * key[2]
+        arr = np.zeros((h, w, 4), np.uint8)
+        arr[..., 3] = a.astype(np.uint8)
+        _SOFT_SHADOWS[key] = _rgba_from_array(arr)
+    return _SOFT_SHADOWS[key]
 
 
 def _make_cloak_icon() -> pygame.Surface:
@@ -1530,13 +1574,13 @@ class Game:
         self._reset_score()
         self.char_sets = {}
         for cid, info in CHARACTERS.items():
-            sprites, anchors, white = _load_char_sprites(info["files"])
+            cs = _load_char_set(cid)
             # Title portrait = same size as in-game (SPRITE_H), not enlarged.
-            portrait = sprites["se"]
-            self.char_sets[cid] = {
-                "name": info["name"], "sprites": sprites, "anchors": anchors,
-                "white": white, "portrait": portrait,
-            }
+            cs.update(name=info["name"], portrait=cs["sprites"]["se"])
+            self.char_sets[cid] = cs
+        self.walk_phase = WALK_START  # the player's walk cycle (0..1), advanced by distance walked
+        self.walk_last = None         # (move start, u) last drawn, to measure the distance
+        self.walk_seen = -1e9
         self.character = character if character in self.char_sets else "archie"
         self._apply_character(self.character)
         self.dalek_sprites = {}
@@ -1561,10 +1605,10 @@ class Game:
         self.tardis_k = tk
         self.tardis_anchor = _base_anchor(self.tardis)
         self.tardis_lamp = ((TARDIS_LAMP_SRC[0] + 0.5) * tk, (TARDIS_LAMP_SRC[1] + 0.5) * tk)
-        self.dalek_shadow = _new_rgba((50, 18))
+        self.dalek_shadow = _new_rgba((50 * PX, 18 * PX))
         pygame.draw.ellipse(self.dalek_shadow, (30, 20, 10, 120), self.dalek_shadow.get_rect())
         self.dalek_shadow = _finish_rgba(self.dalek_shadow)
-        self.tardis_shadow = _new_rgba((76, 30))
+        self.tardis_shadow = _new_rgba((76 * PX, 30 * PX))
         pygame.draw.ellipse(self.tardis_shadow, (24, 16, 8, 110), self.tardis_shadow.get_rect())
         self.tardis_shadow = _finish_rgba(self.tardis_shadow)
         # Dematerialisation: pre-faded TARDIS and shadow (alpha copied exactly,
@@ -1574,30 +1618,27 @@ class Game:
         if os.path.exists(LAMP_GLOW_FILE):
             lamp = pygame.image.load(LAMP_GLOW_FILE).convert_alpha()
         else:  # (run tools/make_fx.py to write it)
-            lamp = _make_glow(11, (255, 236, 190))
+            lamp = _make_glow(11 * PX, (255, 236, 190))
         self.demat_lamps = [_alpha_scaled(lamp, i / 11) for i in range(12)]
-        self.scorch = _new_rgba((34, 14))
+        self.scorch = _new_rgba((34 * PX, 14 * PX))
         pygame.draw.ellipse(self.scorch, (20, 12, 6, 170), self.scorch.get_rect())
-        pygame.draw.ellipse(self.scorch, (10, 6, 4, 200), self.scorch.get_rect().inflate(-14, -6))
+        pygame.draw.ellipse(self.scorch, (10, 6, 4, 200), self.scorch.get_rect().inflate(-14 * PX, -6 * PX))
         self.scorch = _finish_rgba(self.scorch)
         self.puffs = []  # puffs[size][alpha level], pre-faded
-        for radius in (2, 3, 4, 5, 6):
+        for radius in (2 * PX, 3 * PX, 4 * PX, 5 * PX, 6 * PX):
             puff = _new_rgba((radius * 2 + 2, radius * 2 + 2))
             pygame.draw.circle(puff, (214, 236, 190, 255), (radius + 1, radius + 1), radius)
-            pygame.draw.circle(puff, (246, 252, 236, 255), (radius, radius), max(1, radius - 2))
+            pygame.draw.circle(puff, (246, 252, 236, 255), (radius - PX // 2, radius - PX // 2), max(1, radius - 2 * PX))
             puff = _finish_rgba(puff)
             self.puffs.append([_alpha_scaled(puff, i / (PUFF_LEVELS - 1)) for i in range(PUFF_LEVELS)])
         self.disguise_cache = {}
-        self.shadow = _new_rgba((40, 16))
-        pygame.draw.ellipse(self.shadow, (48, 30, 16, 110), self.shadow.get_rect())
-        self.shadow = _finish_rgba(self.shadow)
         self.dirt = build_dirt_variants(make_dirt_texture())
         self.hedges = build_hedge_variants()
         self.view_w = max(1, int(round(WIN_W / ZOOM)))
         self.view_h = max(1, int(round(WIN_H / ZOOM)))
         self.view = pygame.Surface((self.view_w, self.view_h)).convert()
         self.frame = None  # opaque window-sized back buffer, made on the first draw
-        # Fonts sized for the low-res view; they look chunky after nearest 2x.
+        # Font sizes as on the old low-res view; load_font draws them PX times larger.
         self.font_title = load_font(28, bold=True)   # title screen name
         self.font_title_sub = load_font(14)            # "Choose Archie or Holly"
         self.font_title_help = load_font(11)           # controls help on title
@@ -1676,6 +1717,7 @@ class Game:
         self.sprites = cs["sprites"]
         self.anchors = cs["anchors"]
         self.white = cs["white"]
+        self.cs = cs
         self.archie_fades = {}
 
     # ----- Score and leaderboard ------------------------------------------
@@ -2981,7 +3023,7 @@ class Game:
         return float(self.col), float(self.row)
 
     def _visible_tiles(self, cam_x, cam_y):
-        margin_x = TILE_W + 8
+        margin_x = TILE_W + 8 * PX
         margin_top = HEDGE_H + TILE_H
         margin_bottom = TILE_H * 2
         tiles = []
@@ -3058,20 +3100,13 @@ class Game:
         # Feet sit near the centre; looking a little above them puts his body
         # just above centre. The maze scrolls; tiles are not yaw-rotated.
         cam_x = look_x - self.view_w / 2
-        cam_y = (look_y - 46) - self.view_h / 2
+        cam_y = (look_y - 46 * PX) - self.view_h / 2
         self.cam = (cam_x, cam_y)
         tiles = self._visible_tiles(cam_x, cam_y)
 
         feet_sx = int(round(feet_x - cam_x))
         feet_sy = int(round(feet_y - cam_y))
-        if self.moving:
-            t = max(0.0, min(1.0, (now - self.move_t0) / MOVE_MS))
-            local = (t * 2.0) % 1.0 if t < 1.0 else 0.0
-            feet_sy -= int(round(math.sin(local * math.pi) * 2))
-        elif self.exit_t0 is not None:
-            t = self.exit_walk_u(now)
-            local = (t * 2.0) % 1.0 if t < 1.0 else 0.0
-            feet_sy -= int(round(math.sin(local * math.pi) * 2))
+        # (No hop bob: the walk cycle frames carry the motion.)
         self.archie_feet = (feet_sx, feet_sy)
         # One pass, back to front. Archie, the Daleks and the TARDIS slot in
         # by depth (row + col) when the tiles in front of them start.
@@ -3144,7 +3179,7 @@ class Game:
         fx -= cam_x
         fy += TILE_H // 2 - cam_y
         img = self.tardis
-        if fx < -img.get_width() or fx > self.view_w + img.get_width() or fy < -40 or fy > self.view_h + img.get_height():
+        if fx < -img.get_width() or fx > self.view_w + img.get_width() or fy < -40 * PX or fy > self.view_h + img.get_height():
             return
         if self.exit_demat_t0 is not None:
             alpha, lamp = self._demat_curve(now - self.exit_demat_t0)
@@ -3159,7 +3194,7 @@ class Game:
         ax, ay = self.tardis_anchor
         if level > 0:
             sh = self.demat_shadows[level]
-            screen.blit(sh, (int(fx - sh.get_width() / 2), int(fy - sh.get_height() / 2 + 2)))
+            screen.blit(sh, (int(fx - sh.get_width() / 2), int(fy - sh.get_height() / 2 + 2 * PX)))
             screen.blit(self.demat_fades[level], (int(round(fx - ax)), int(round(fy - ay))))
         li = int(round(lamp * 11))
         if li > 0:
@@ -3208,7 +3243,7 @@ class Game:
         fx -= cam_x
         fy += TILE_H // 2 - cam_y
         img_w, img_h = self.tardis.get_size()
-        if fx < -img_w or fx > self.view_w + img_w or fy < -40 or fy > self.view_h + img_h:
+        if fx < -img_w or fx > self.view_w + img_w or fy < -40 * PX or fy > self.view_h + img_h:
             return
         self._blit_tardis(screen, fx, fy, alpha, lamp)
 
@@ -3220,7 +3255,7 @@ class Game:
         fx = int(round(fx - cam_x))
         fy = int(round(fy + TILE_H // 2 - cam_y))
         o.feet = (fx, fy)
-        if fx < -80 or fx > self.view_w + 80 or fy < -20 or fy > self.view_h + SPRITE_H + 20:
+        if fx < -80 * PX or fx > self.view_w + 80 * PX or fy < -20 * PX or fy > self.view_h + SPRITE_H + 20 * PX:
             return
         key = FACING_SPRITE[o.facing]
         sprite = cs["sprites"][key]
@@ -3228,7 +3263,7 @@ class Game:
         pos = (int(round(fx - ax)), int(round(fy - ay)))
         if o.dead:
             t = now - o.death_t0
-            screen.blit(self.scorch, (fx - self.scorch.get_width() // 2, fy - 7))
+            screen.blit(self.scorch, (fx - self.scorch.get_width() // 2, fy - 7 * PX))
             ghosts = cs["white"][key]
             if t < LASER_MS:
                 screen.blit(ghosts[0] if int(t / 45) % 2 == 0 else sprite, pos)
@@ -3236,29 +3271,96 @@ class Game:
                 u = (t - LASER_MS) / (DEATH_FADE_MS - LASER_MS)
                 screen.blit(ghosts[max(0, min(len(ghosts) - 1, int(u * (len(ghosts) - 1) + 0.5)))], pos)
             return
-        if o.moving:
-            local = (o.u * 2.0) % 1.0 if o.u < 1.0 else 0.0
-            fy -= int(round(math.sin(local * math.pi) * 2))
-            pos = (pos[0], int(round(fy - ay)))
+        phase = None
+        if o.moving and o.u < 1.0:
+            phase = (WALK_START + ease(o.u) / cs["cycle_cells"]) % 1.0
         if o.disguised:
             shade = int(round(max(0.0, min(1.0, (fy - TILE_H // 2) / self.view_h)) * (N_HEDGE_SHADES - 1)))
             self._blit_disguise(screen, fx, fy, DISGUISE_SCALE, shade)
             return
-        screen.blit(self.shadow, (fx - self.shadow.get_width() // 2, fy - 6))
-        screen.blit(sprite, pos)
+        self._blit_char(screen, cs, key, fx, fy, phase)
+
+    def _char_frame(self, cs, key: str, phase):
+        """(image, feet) for a facing: the standing frame (phase None) or the
+        walk-cycle frame at phase 0..1."""
+        if phase is None:
+            return cs["sprites"][key], cs["rest"][key], False
+        i = int(phase * cs["frames"]) % cs["frames"]
+        return cs["walk"][key][i], cs["feet"][key][i], True
+
+    def _char_shadow(self, cs, key: str, fx: float, fy: float, feet, walking: bool, fade: float = 1.0):
+        """Ground the figure (as in Haunted Mansion): a soft pool where they
+        stand and a small contact shadow under each shoe, fading as it lifts."""
+        k = cs["k"]
+        pool = soft_shadow(30 * k, 12 * k, 70 * fade)
+        screen = self._shadow_target
+        screen.blit(pool, (int(fx - pool.get_width() / 2), int(fy - pool.get_height() / 2)))
+        ax, ay = cs["anchors"][key]
+        x0, y0 = fx - ax, fy - ay
+        for leg in ("far", "near"):
+            f = feet[leg]
+            lift = f["lift"] if walking else 0.0
+            u = max(0.0, 1.0 - lift / (9.0 * k))
+            if u <= 0.05:
+                continue
+            sh = soft_shadow(11 * k * (0.65 + 0.35 * u), 4.5 * k * (0.65 + 0.35 * u), 150 * u * fade)
+            sx, sy = x0 + f["x"], y0 + f["y"] + lift
+            screen.blit(sh, (int(sx - sh.get_width() / 2), int(sy - sh.get_height() / 2 - 1)))
+
+    def _blit_char(self, screen, cs, key: str, fx: int, fy: int, phase, fade_level: int | None = None):
+        """Archie or Holly with their feet at (fx, fy): shadows, then the figure.
+        fade_level (1..15 of 16) draws a faded copy (walking into the TARDIS)."""
+        img, feet, walking = self._char_frame(cs, key, phase)
+        ax, ay = cs["anchors"][key]
+        fade = 1.0 if fade_level is None else fade_level / 16
+        self._shadow_target = screen
+        self._char_shadow(cs, key, fx, fy, feet, walking, fade)
+        if fade_level is not None:
+            ck = (id(img), fade_level)
+            faded = self.archie_fades.get(ck)
+            if faded is None:
+                faded = _alpha_scaled(img, fade)
+                self.archie_fades[ck] = faded
+            img = faded
+        screen.blit(img, (int(round(fx - ax)), int(round(fy - ay))))
+
+    def _walk_phase(self, now: float):
+        """The player's walk-cycle phase, advanced by the distance actually
+        covered (so the planted foot never slides), or None when standing."""
+        if self.moving:
+            key, u, sign = self.move_t0, self._step_u(now), 1
+            if self.src is not None and self.dst is not None:
+                dc = self.dst[0] - self.src[0]
+                dr = self.dst[1] - self.src[1]
+                sign = 1 if (dc, dr) == self.facing else -1  # stepping back: the cycle runs backwards
+        elif self.exit_t0 is not None:
+            key, u, sign = ("exit", self.exit_t0), self.exit_walk_u(now), 1
+        else:
+            if now - self.walk_seen > WALK_IDLE_MS:
+                self.walk_phase = WALK_START
+                self.walk_last = None
+            return None
+        last = self.walk_last
+        prev_u = last[1] if last is not None and last[0] == key else 0.0
+        if last is None and now - self.walk_seen > WALK_IDLE_MS:
+            self.walk_phase = WALK_START
+        self.walk_phase = (self.walk_phase + sign * (u - prev_u) / self.cs["cycle_cells"]) % 1.0
+        self.walk_last = (key, u)
+        self.walk_seen = now
+        return self.walk_phase
 
     def _draw_dalek(self, screen, d: Dalek, now: float, cam_x: float, cam_y: float):
         fx, fy = tile_origin(d.pos[0], d.pos[1])
         fx = int(round(fx - cam_x))
         fy = int(round(fy + TILE_H // 2 - cam_y))
         d.feet = (fx, fy)
-        if fx < -80 or fx > self.view_w + 80 or fy < -20 or fy > self.view_h + DALEK_H + 20:
+        if fx < -80 * PX or fx > self.view_w + 80 * PX or fy < -20 * PX or fy > self.view_h + DALEK_H + 20 * PX:
             return
         key = d.sprite_key(now)
         img = self.dalek_sprites[key]
         ax, ay = self.dalek_anchor[key]
         sh = self.dalek_shadow
-        screen.blit(sh, (fx - sh.get_width() // 2, fy - sh.get_height() // 2 + 1))
+        screen.blit(sh, (fx - sh.get_width() // 2, fy - sh.get_height() // 2 + PX))
         screen.blit(img, (int(round(fx - ax)), int(round(fy - ay))))
 
     def _dalek_point(self, d: Dalek, now: float, table):
@@ -3287,12 +3389,12 @@ class Game:
         if not 0.0 <= t <= 1.0:
             return
         alpha = int(235 * (1.0 - t) ** 1.3)
-        reach = 6 + 22 * ease(t)
+        reach = (6 + 22 * ease(t)) * PX
         for i in range(12):
             ang = i * (math.tau / 12) + (i % 3) * 0.35
             r = reach * (0.75 + 0.25 * ((i * 7) % 5) / 4)
             px = fx + math.cos(ang) * r
-            py = fy - 18 + math.sin(ang) * r * 0.6
+            py = fy - 18 * PX + math.sin(ang) * r * 0.6
             sizes = self.puffs[max(0, min(4, 4 - int(t * 4) + (i % 2) - 1))]
             puff = sizes[max(0, min(PUFF_LEVELS - 1, round(alpha / 255 * (PUFF_LEVELS - 1))))]
             screen.blit(puff, (int(px - puff.get_width() / 2), int(py - puff.get_height() / 2)))
@@ -3302,9 +3404,10 @@ class Game:
         sprite = self.sprites[key]
         ax, ay = self.anchors[key]
         pos = (int(round(feet_sx - ax)), int(round(feet_sy - ay)))
+        phase = None if self.dead else self._walk_phase(now)
         if self.dead:
             t = now - self.death_t0
-            screen.blit(self.scorch, (feet_sx - self.scorch.get_width() // 2, feet_sy - 7))
+            screen.blit(self.scorch, (feet_sx - self.scorch.get_width() // 2, feet_sy - 7 * PX))
             ghosts = self.white[key]
             if t < LASER_MS:
                 screen.blit(ghosts[0] if int(t / 45) % 2 == 0 else sprite, pos)
@@ -3334,15 +3437,9 @@ class Game:
             if level <= 0:
                 return
             if level < 16:
-                faded = self.archie_fades.get((key, level))
-                if faded is None:
-                    faded = (_alpha_scaled(self.shadow, level / 16), _alpha_scaled(sprite, level / 16))
-                    self.archie_fades[(key, level)] = faded
-                screen.blit(faded[0], (feet_sx - self.shadow.get_width() // 2, feet_sy - 6))
-                screen.blit(faded[1], pos)
+                self._blit_char(screen, self.cs, key, feet_sx, feet_sy, phase, fade_level=level)
                 return
-        screen.blit(self.shadow, (feet_sx - self.shadow.get_width() // 2, feet_sy - 6))
-        screen.blit(sprite, pos)
+        self._blit_char(screen, self.cs, key, feet_sx, feet_sy, phase)
         if since_off < POOF_MS:
             u = since_off / POOF_MS
             self._blit_disguise(screen, feet_sx, feet_sy, DISGUISE_SCALE * (1.0 - ease(u)), shade)
@@ -3350,16 +3447,17 @@ class Game:
 
     def _draw_peek_eyes(self, screen, fx: int, fy: int, now: float):
         """Two little eyes peeping over the hedge so the player can find him."""
-        y = fy - 32
+        P = PX
+        y = fy - 32 * P
         if (now - self.disguise_t0) % 2600 > 2470:  # blink
-            for ex in (fx - 7, fx + 2):
-                pygame.draw.line(screen, (18, 36, 16), (ex, y + 2), (ex + 4, y + 2))
+            for ex in (fx - 7 * P, fx + 2 * P):
+                pygame.draw.line(screen, (18, 36, 16), (ex, y + 2 * P), (ex + 4 * P, y + 2 * P), P)
             return
         look = 2 if self.facing in (DIR_SE, DIR_NE) else 0
-        for ex in (fx - 7, fx + 2):
-            pygame.draw.rect(screen, (18, 36, 16), (ex - 1, y - 1, 7, 6))
-            pygame.draw.rect(screen, (248, 248, 238), (ex, y, 5, 4))
-            pygame.draw.rect(screen, (24, 20, 16), (ex + 1 + look // 2, y + 1, 2, 2))
+        for ex in (fx - 7 * P, fx + 2 * P):
+            pygame.draw.rect(screen, (18, 36, 16), (ex - P, y - P, 7 * P, 6 * P), border_radius=P)
+            pygame.draw.ellipse(screen, (248, 248, 238), (ex, y, 5 * P, 4 * P))
+            pygame.draw.ellipse(screen, (24, 20, 16), (ex + (1 + look // 2) * P, y + P, 2 * P, 2 * P))
 
     def _blit_disguise(self, screen, fx: int, fy: int, scale: float, shade: int):
         if scale < 0.05:
@@ -3376,7 +3474,7 @@ class Game:
                 u = max(0.0, min(1.0, (now - d.aim_t0) / max(1.0, d.fire_at - d.aim_t0)))
                 ex, ey = self._dalek_point(d, now, self.dalek_eye)
                 flick = 0.75 + 0.25 * math.sin(now * 0.06)
-                self._solid_glow(screen, ex, ey, (2.0 + 4.0 * u) * flick, EYE_GLOW)
+                self._solid_glow(screen, ex, ey, (2.0 + 4.0 * u) * flick * PX, EYE_GLOW)
             if d.state == "aim" or (d.state == "fire" and now - d.fire_t0 < LASER_MS + 400):
                 self._draw_shout(screen, d, now)
         if self.dead and self.shooter is not None:
@@ -3384,25 +3482,25 @@ class Game:
             if t < LASER_MS:
                 gx, gy = self._dalek_point(self.shooter, now, self.dalek_gun)
                 fx, fy = self.archie_feet
-                self._draw_laser(screen, (gx, gy), (fx, fy - 34), now, t)
+                self._draw_laser(screen, (gx, gy), (fx, fy - 34 * PX), now, t)
         o = self.other
         if o is not None and o.dead and o.shooter is not None and o.shooter in self.daleks:
             t = now - o.death_t0
             if 0 <= t < LASER_MS:
                 gx, gy = self._dalek_point(o.shooter, now, self.dalek_gun)
-                self._draw_laser(screen, (gx, gy), (o.feet[0], o.feet[1] - 34), now, t)
+                self._draw_laser(screen, (gx, gy), (o.feet[0], o.feet[1] - 34 * PX), now, t)
 
     def _draw_shout(self, screen, d: Dalek, now: float):
         fx, fy = d.feet
-        x, y = fx, fy - DALEK_H - 6
-        jig = int(math.sin(now * 0.05) * 1.5)
+        x, y = fx, fy - DALEK_H - 6 * PX
+        jig = int(math.sin(now * 0.05) * 1.5 * PX)
         text = "EXTERMINATE!"
         fg = self.font_shout.render(text, True, (255, 236, 120))
         bg = self.font_shout.render(text, True, (60, 10, 6))
         bx = int(x - fg.get_width() / 2) + jig
         by = int(y - fg.get_height())
-        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)):
-            screen.blit(bg, (bx + ox, by + oy))
+        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 1), (2, 2)):
+            screen.blit(bg, (bx + ox * PX, by + oy * PX))
         screen.blit(fg, (bx, by))
 
     def _solid_glow(self, screen, x: float, y: float, radius: float, colours):
@@ -3429,8 +3527,8 @@ class Game:
             w = int(round(width * j * fade))
             if w >= 1:
                 pygame.draw.line(screen, colour, a, b, w)
-        self._solid_glow(screen, a[0], a[1], 4.0 * j * fade, LASER_TIP_GLOW)
-        self._solid_glow(screen, b[0], b[1], 5.0 * rng.uniform(0.8, 1.15) * fade, LASER_HIT_GLOW)
+        self._solid_glow(screen, a[0], a[1], 4.0 * PX * j * fade, LASER_TIP_GLOW)
+        self._solid_glow(screen, b[0], b[1], 5.0 * PX * rng.uniform(0.8, 1.15) * fade, LASER_HIT_GLOW)
 
     def _draw_cloak_hud(self, screen, now: float):
         """Chameleon Cloak device with charge meter (bottom-right of the view)."""
@@ -3450,41 +3548,42 @@ class Game:
             status = "ready"
         icon = self.cloak_icon
         label = self.font_hud.render("Chameleon Cloak", True, (240, 234, 214))
-        pad = 6
-        bw = max(icon.get_width() + 10, label.get_width() + 8, 70)
-        bh = icon.get_height() + label.get_height() + 18
+        P = PX
+        pad = 6 * P
+        bw = max(icon.get_width() + 10 * P, label.get_width() + 8 * P, 70 * P)
+        bh = icon.get_height() + label.get_height() + 18 * P
         box = _new_rgba((bw + pad * 2, bh + pad * 2))
         box.fill((36, 24, 16, 200))
-        pygame.draw.rect(box, (186, 160, 96, 220), box.get_rect(), 1)
+        pygame.draw.rect(box, (186, 160, 96, 220), box.get_rect(), P)
         ix = pad + (bw - icon.get_width()) // 2
         box.blit(icon, (ix, pad))
         # Charge meter under the badge
-        mx, my, mw, mh = pad + 4, pad + icon.get_height() + 2, bw - 8, 5
+        mx, my, mw, mh = pad + 4 * P, pad + icon.get_height() + 2 * P, bw - 8 * P, 5 * P
         pygame.draw.rect(box, (20, 14, 10, 230), (mx, my, mw, mh))
         pygame.draw.rect(box, bar, (mx, my, int(mw * max(0.0, min(1.0, frac))), mh))
         if status == "ready" and int(now / 400) % 2 == 0:
-            pygame.draw.rect(box, (220, 255, 180, 180), (mx, my, mw, mh), 1)
-        box.blit(label, (pad + (bw - label.get_width()) // 2, my + mh + 3))
+            pygame.draw.rect(box, (220, 255, 180, 180), (mx, my, mw, mh), P)
+        box.blit(label, (pad + (bw - label.get_width()) // 2, my + mh + 3 * P))
         box = _finish_rgba(box)
-        screen.blit(box, (self.view_w - box.get_width() - 8, self.view_h - box.get_height() - 8))
+        screen.blit(box, (self.view_w - box.get_width() - 8 * P, self.view_h - box.get_height() - 8 * P))
 
     def _draw_minimap(self, screen):
-        # scale 3 on the low-res view → twice the old on-screen size after 2x zoom.
-        scale = 3
-        pad = 4
+        scale = 3 * PX  # px per maze cell
+        pad = 4 * PX
         size = MAZE_SIZE * scale
         box = _new_rgba((size + pad * 2, size + pad * 2))
         box.fill((36, 24, 16, 200))
-        pygame.draw.rect(box, (186, 160, 96, 200), box.get_rect(), 1)
+        pygame.draw.rect(box, (186, 160, 96, 200), box.get_rect(), PX)
         for row in range(MAZE_SIZE):
             for col in range(MAZE_SIZE):
                 colour = (28, 72, 36) if self.grid[row][col] == WALL else (142, 98, 56)
                 box.fill(colour, (pad + col * scale, pad + row * scale, scale, scale))
         ec, er = self.exit_cell
-        pygame.draw.circle(box, (70, 130, 255), (pad + ec * scale + 1, pad + er * scale + 1), 3)
+        half = scale // 2
+        pygame.draw.circle(box, (70, 130, 255), (pad + ec * scale + half, pad + er * scale + half), 3 * PX)
         for d in self.daleks:
             c, r = d.cell()
-            pygame.draw.circle(box, (235, 40, 36), (pad + c * scale + 1, pad + r * scale + 1), 2)
+            pygame.draw.circle(box, (235, 40, 36), (pad + c * scale + half, pad + r * scale + half), 2 * PX)
         o = self.other
         if o is not None and not o.in_tardis:
             colour = (120, 70, 60) if o.dead else ((255, 150, 210) if o.character == "holly" else (140, 220, 255))
@@ -3494,17 +3593,17 @@ class Game:
         py = pad + int(self.row * scale)
         pygame.draw.rect(box, (255, 248, 230), (px, py, scale, scale))
         box = _finish_rgba(box)
-        screen.blit(box, (self.view_w - box.get_width() - 8, 8))
+        screen.blit(box, (self.view_w - box.get_width() - 8 * PX, 8 * PX))
 
     def _draw_level_hud(self, screen):
         text = self.font_score.render(f"Level: {self.level}    Daleks: {len(self.daleks)}", True, (240, 234, 214))
-        pad_x, pad_y = 8, 5
+        pad_x, pad_y = 8 * PX, 5 * PX
         box = _new_rgba((text.get_width() + pad_x * 2, text.get_height() + pad_y * 2))
         box.fill((36, 24, 16, 180))
-        pygame.draw.rect(box, (186, 160, 96, 200), box.get_rect(), 1)
+        pygame.draw.rect(box, (186, 160, 96, 200), box.get_rect(), PX)
         box = _finish_rgba(box)
-        screen.blit(box, (8, 8))
-        screen.blit(text, (8 + pad_x, 8 + pad_y))
+        screen.blit(box, (8 * PX, 8 * PX))
+        screen.blit(text, (8 * PX + pad_x, 8 * PX + pad_y))
 
     def _draw_score_hud(self, screen, now: float | None = None):
         """Score and high score, under the level box (top-left)."""
@@ -3517,27 +3616,28 @@ class Game:
                 ("High", str(hi), gold if beating else (220, 200, 160))]
         labels = [self.font_score.render(a, True, c) for a, _, c in rows]
         values = [self.font_score.render(b, True, c) for _, b, c in rows]
-        pad_x, pad_y, gap, line = 8, 4, 14, self.font_score.get_height()
+        P = PX
+        pad_x, pad_y, gap, line = 8 * P, 4 * P, 14 * P, self.font_score.get_height()
         inner_w = max(l.get_width() for l in labels) + gap + max(v.get_width() for v in values)
-        w = max(92, inner_w + pad_x * 2)
+        w = max(92 * P, inner_w + pad_x * 2)
         h = pad_y * 2 + line * len(rows)
         box = _new_rgba((w, h))
         box.fill((36, 24, 16, 180))
-        pygame.draw.rect(box, (186, 160, 96, 200), box.get_rect(), 1)
+        pygame.draw.rect(box, (186, 160, 96, 200), box.get_rect(), P)
         for i, (l, v) in enumerate(zip(labels, values)):
             y = pad_y + i * line
             box.blit(l, (pad_x, y))
             box.blit(v, (w - pad_x - v.get_width(), y))
-        y0 = 8 + self.font_score.get_height() + 10 + 4  # just under the level box
-        screen.blit(_finish_rgba(box), (8, y0))
+        y0 = 8 * P + self.font_score.get_height() + 10 * P + 4 * P  # just under the level box
+        screen.blit(_finish_rgba(box), (8 * P, y0))
         if self.other is not None:
             o = self.other
             state = " (in the TARDIS)" if o.in_tardis else (" (exterminated)" if o.dead else "")
             line = self.font_hud.render(f"{o.name}: {o.score}{state}", True, (230, 214, 180))
-            back = _new_rgba((line.get_width() + 10, line.get_height() + 4))
+            back = _new_rgba((line.get_width() + 10 * P, line.get_height() + 4 * P))
             back.fill((36, 24, 16, 160))
-            screen.blit(_finish_rgba(back), (8, y0 + h + 3))
-            screen.blit(line, (13, y0 + h + 5))
+            screen.blit(_finish_rgba(back), (8 * P, y0 + h + 3 * P))
+            screen.blit(line, (13 * P, y0 + h + 5 * P))
         if now is not None and self.bonus_pop_t0 is not None:
             t = (now - self.bonus_pop_t0) / BONUS_POP_MS
             if 0.0 <= t < 1.0:
@@ -3546,9 +3646,9 @@ class Game:
                 text = self.bonus_pop_text
                 surf = self.font_score.render(text, True, (255, 220, 120))
                 shadow = self.font_score.render(text, True, (20, 12, 6))
-                x = 8 + w + 5
-                y = y0 + pad_y - int(round(6 * t))
-                screen.blit(_alpha_scaled(shadow, fade * 0.8), (x + 1, y + 1))
+                x = 8 * P + w + 5 * P
+                y = y0 + pad_y - int(round(6 * P * t))
+                screen.blit(_alpha_scaled(shadow, fade * 0.8), (x + P, y + P))
                 screen.blit(_alpha_scaled(surf, fade), (x, y))
 
     def _draw_name_entry(self, screen, now: float):
@@ -3565,26 +3665,27 @@ class Game:
         foot = self.font_small.render("Enter to submit    Esc to skip", True, (200, 180, 140))
         note = self.font_hud.render("Your country's flag is shown next to your score", True, (170, 152, 118))
         sample = self.font_entry.render("W" * NAME_MAX, True, (0, 0, 0))
-        field_w, field_h = sample.get_width() + 16, sample.get_height() + 8
-        gap = 7
+        P = PX
+        field_w, field_h = sample.get_width() + 16 * P, sample.get_height() + 8 * P
+        gap = 7 * P
         blocks = lines + [prompt, None, note, foot]
-        width = max([t.get_width() for t in blocks if t is not None] + [field_w]) + 40
-        height = sum(t.get_height() if t is not None else field_h for t in blocks) + gap * (len(blocks) - 1) + 26
+        width = max([t.get_width() for t in blocks if t is not None] + [field_w]) + 40 * P
+        height = sum(t.get_height() if t is not None else field_h for t in blocks) + gap * (len(blocks) - 1) + 26 * P
         panel = _new_rgba((width, height))
         panel.fill((36, 24, 16, 255))
-        pygame.draw.rect(panel, (212, 170, 90), panel.get_rect(), 2)
-        y = 13
+        pygame.draw.rect(panel, (212, 170, 90), panel.get_rect(), 2 * P)
+        y = 13 * P
         for t in blocks:
             if t is None:
                 fx = (width - field_w) // 2
                 pygame.draw.rect(panel, (16, 10, 6, 255), (fx, y, field_w, field_h))
-                pygame.draw.rect(panel, (255, 220, 120, 255), (fx, y, field_w, field_h), 1)
+                pygame.draw.rect(panel, (255, 220, 120, 255), (fx, y, field_w, field_h), P)
                 name = self.font_entry.render(self.entry_name, True, (255, 248, 230))
-                nx = fx + 8
-                panel.blit(name, (nx, y + 4))
+                nx = fx + 8 * P
+                panel.blit(name, (nx, y + 4 * P))
                 if int(now / 450) % 2 == 0 and len(self.entry_name) < NAME_MAX:
-                    cx = nx + name.get_width() + 1
-                    pygame.draw.rect(panel, (255, 220, 120, 255), (cx, y + 5, 2, field_h - 10))
+                    cx = nx + name.get_width() + P
+                    pygame.draw.rect(panel, (255, 220, 120, 255), (cx, y + 5 * P, 2 * P, field_h - 10 * P))
                 y += field_h + gap
                 continue
             panel.blit(t, ((width - t.get_width()) // 2, y))
@@ -3598,33 +3699,33 @@ class Game:
         surf = self.font_big.render(text, True, colour)
         shadow = self.font_big.render(text, True, (20, 12, 6))
         x = (self.view_w - surf.get_width()) // 2
-        screen.blit(_alpha_scaled(shadow, fade * 0.8), (x + 1, y + 1))
+        screen.blit(_alpha_scaled(shadow, fade * 0.8), (x + PX, y + PX))
         screen.blit(_alpha_scaled(surf, fade), (x, y))
 
     def _small_banner(self, screen, text: str, y: int, colour=(255, 236, 170)):
         surf = self.font_small.render(text, True, colour)
-        back = _new_rgba((surf.get_width() + 16, surf.get_height() + 8))
+        back = _new_rgba((surf.get_width() + 16 * PX, surf.get_height() + 8 * PX))
         back.fill((20, 12, 6, 190))
-        pygame.draw.rect(back, (186, 160, 96, 220), back.get_rect(), 1)
+        pygame.draw.rect(back, (186, 160, 96, 220), back.get_rect(), PX)
         x = (self.view_w - back.get_width()) // 2
         screen.blit(_finish_rgba(back), (x, y))
-        screen.blit(surf, (x + 8, y + 4))
+        screen.blit(surf, (x + 8 * PX, y + 4 * PX))
 
     def _draw_net_banners(self, screen, now: float):
-        y = self.view_h - 30
+        y = self.view_h - 30 * PX
         if self.watching(now):
             name = self.other.name
             self._small_banner(screen, f"Watching {name}", y)
             sub = (f"In the TARDIS - it leaves when {name} gets here" if self.won
                    else f"If {name} reaches the TARDIS you're both through")
             t = self.font_hud.render(sub, True, (230, 214, 180))
-            screen.blit(t, ((self.view_w - t.get_width()) // 2, y - 12))
+            screen.blit(t, ((self.view_w - t.get_width()) // 2, y - 12 * PX))
         elif self.dead and self.net is not None and not self.net_over and self.other is not None:
             self._small_banner(screen, "EXTERMINATED", y, (255, 96, 72))
         if self.net_notice is not None:
             text, t0 = self.net_notice
             if now - t0 < NET_NOTICE_MS:
-                self._small_banner(screen, text, 64, (255, 140, 110))
+                self._small_banner(screen, text, 64 * PX, (255, 140, 110))
             else:
                 self.net_notice = None
 
@@ -3635,7 +3736,7 @@ class Game:
             t = now - self.start_t0
             if t < LEVEL_BANNER_MS:
                 fade = min(1.0, t / 300.0, (LEVEL_BANNER_MS - t) / 600.0)
-                self._banner(screen, f"Level {self.level}", (255, 236, 170), fade, 40)
+                self._banner(screen, f"Level {self.level}", (255, 236, 170), fade, 40 * PX)
         # "Level complete!" while the TARDIS dematerialises with Archie inside.
         if self.exit_demat_t0 is not None and self.card_t0 is None:
             t = now - self.exit_demat_t0
@@ -3665,10 +3766,10 @@ class Game:
         else:
             level = self.level + 1
             text_fade = a
-        self._banner(screen, f"Level {level}", (255, 236, 170), text_fade, self.view_h // 2 - 24)
+        self._banner(screen, f"Level {level}", (255, 236, 170), text_fade, self.view_h // 2 - 24 * PX)
         sub = self.font_small.render(f"{daleks_for_level(level)} Daleks", True, (232, 214, 170))
         if text_fade > 0.02:
-            screen.blit(_alpha_scaled(sub, text_fade), ((self.view_w - sub.get_width()) // 2, self.view_h // 2 + 4))
+            screen.blit(_alpha_scaled(sub, text_fade), ((self.view_w - sub.get_width()) // 2, self.view_h // 2 + 4 * PX))
 
     def _draw_panel(self, screen, title_text: str, sub_text: str, title_colour, foot: str | None = None,
                     extra: list[str] | None = None, pop: tuple[str, float] | None = None,
@@ -3685,27 +3786,28 @@ class Game:
         foot_s = self.font_small.render(foot, True, (232, 214, 170)) if foot else None
         extra_s = [self.font_score.render(e.replace(".", dot), True, (255, 236, 170) if i == 0 else (200, 180, 140))
                    for i, e in enumerate(extra or [])]
-        gap = 8
+        P = PX
+        gap = 8 * P
         lines = [title, sub] + extra_s + ([foot_s] if foot_s else [])
-        width = max(t.get_width() for t in lines) + 40
-        height = sum(t.get_height() for t in lines) + gap * (len(lines) - 1) + 28
+        width = max(t.get_width() for t in lines) + 40 * P
+        height = sum(t.get_height() for t in lines) + gap * (len(lines) - 1) + 28 * P
         panel = _new_rgba((width, height))
         panel.fill((36, 24, 16, 255))
-        pygame.draw.rect(panel, (212, 170, 90), panel.get_rect(), 2)
-        y = 14
+        pygame.draw.rect(panel, (212, 170, 90), panel.get_rect(), 2 * P)
+        y = 14 * P
         pop_at = None
         for t in lines:
             panel.blit(t, ((width - t.get_width()) // 2, y))
             if extra_s and t is extra_s[0]:
-                pop_at = ((width + t.get_width()) // 2 + 6, y)
+                pop_at = ((width + t.get_width()) // 2 + 6 * P, y)
             y += t.get_height() + gap
         if pop and pop_at is not None:
             text, pt = pop
             fade = 1.0 if pt < 0.6 else 1.0 - (pt - 0.6) / 0.4
             surf = self.font_score.render(text, True, (255, 220, 120))
             shadow = self.font_score.render(text, True, (20, 12, 6))
-            px, py = pop_at[0], pop_at[1] - int(round(6 * pt))
-            panel.blit(_alpha_scaled(shadow, fade * 0.8), (px + 1, py + 1))
+            px, py = pop_at[0], pop_at[1] - int(round(6 * P * pt))
+            panel.blit(_alpha_scaled(shadow, fade * 0.8), (px + P, py + P))
             panel.blit(_alpha_scaled(surf, fade), (px, py))
         panel = _finish_rgba(panel)
         screen.blit(panel, ((self.view_w - width) // 2, (self.view_h - height) // 2))
@@ -3834,8 +3936,8 @@ class Game:
         veil.fill((10, 6, 4, 150))
         screen.blit(_finish_rgba(veil), (0, 0))
         title = self.font_title.render("Daleks in Hedges", True, (255, 236, 170))
-        screen.blit(self.font_title.render("Daleks in Hedges", True, (20, 12, 6)), ((self.view_w - title.get_width()) // 2 + 1, 8))
-        screen.blit(title, ((self.view_w - title.get_width()) // 2, 7))
+        screen.blit(self.font_title.render("Daleks in Hedges", True, (20, 12, 6)), ((self.view_w - title.get_width()) // 2 + PX, 8 * PX))
+        screen.blit(title, ((self.view_w - title.get_width()) // 2, 7 * PX))
         lb = self.lobby
         stage = lb["stage"]
         char = self.char_sets[CHAR_ORDER[lb["char"]]]["name"]
@@ -4201,23 +4303,23 @@ class Game:
         Matches `_draw_title_portraits`: frames from pad_top above the sprites
         down through pad_bot, plus the SELECTED label 14px above the frame.
         """
-        pad_top, pad_bot = 14, 34
+        pad_top, pad_bot = 14 * PX, 34 * PX
         img_h = max(self.char_sets[cid]["portrait"].get_height() for cid in CHAR_ORDER)
-        y0 = self.view_h // 2 - 50
+        y0 = self.view_h // 2 - 50 * PX
         by = y0 - pad_top
         bh = pad_top + img_h + pad_bot
-        top = by - 14  # SELECTED sits above the frame
+        top = by - 14 * PX  # SELECTED sits above the frame
         bot = by + bh
         return top, bot, (top + bot) / 2.0, y0
 
     def _title_footer_help_y(self) -> int:
         """Y of the first controls-help line on the title screen."""
-        copy_margin = 8
-        copy_gap = 10
+        copy_margin = 8 * PX
+        copy_gap = 10 * PX
         n_help = 3
         copy_lines = _wrap_text(self.font_title_copy, TITLE_COPYRIGHT, self.view_w - copy_margin * 2)
-        copy_y0 = self.view_h - 6 - copy_gap * len(copy_lines)
-        return copy_y0 - 6 - 14 * n_help
+        copy_y0 = self.view_h - 6 * PX - copy_gap * len(copy_lines)
+        return copy_y0 - 6 * PX - 14 * PX * n_help
 
     def _draw_title(self, screen, now: float):
         """Title overlay on the live decorative maze: name, portraits, help."""
@@ -4228,18 +4330,18 @@ class Game:
         title = self.font_title.render("Daleks in Hedges", True, (255, 236, 170))
         shadow = self.font_title.render("Daleks in Hedges", True, (20, 12, 6))
         tx = (self.view_w - title.get_width()) // 2
-        screen.blit(shadow, (tx + 1, 8))
-        screen.blit(title, (tx, 7))
+        screen.blit(shadow, (tx + PX, 8 * PX))
+        screen.blit(title, (tx, 7 * PX))
         t0 = self.title_t0 if self.title_t0 is not None else now
         show_scores = int((now - t0) // TITLE_PANEL_MS) % 2 == 1
         if show_scores:
             # Heading + panel share the character-choice block's vertical centre.
-            self._draw_title_scores(screen, title_bottom=7 + title.get_height())
+            self._draw_title_scores(screen, title_bottom=7 * PX + title.get_height())
         else:
             sub = self.font_title_sub.render("Choose Archie or Holly", True, (220, 200, 160))
-            sub_y = 7 + title.get_height() + 4
+            sub_y = 7 * PX + title.get_height() + 4 * PX
             screen.blit(sub, ((self.view_w - sub.get_width()) // 2, sub_y))
-            self._draw_title_portraits(screen)
+            self._draw_title_portraits(screen, now)
         self._draw_title_footer(screen)
 
     def _draw_title_scores(self, screen, title_bottom: int):
@@ -4248,28 +4350,29 @@ class Game:
         status = self.board.status
         cream, gold, dim = (240, 234, 214), (255, 220, 120), (200, 180, 140)
         heading = self.font_title_sub.render("Top 10 Scores", True, (220, 200, 160))
-        head_gap = 6  # space between heading and panel
+        P = PX
+        head_gap = 6 * P  # space between heading and panel
         font = self.font_title_help
-        pad_x, pad_y = 16, 8
+        pad_x, pad_y = 16 * P, 8 * P
         rank_w = font.size("10.")[0]
         name_w = font.size("W" * NAME_MAX)[0]
         score_w = font.size("000000")[0]
-        col_gap = 18
-        flag_w, flag_gap = 20, 8  # flags are 20x10 (flagcdn w20)
+        col_gap = 18 * P
+        flag_w, flag_gap = 20 * P, 8 * P  # flags are 40x20 (flagcdn w40)
         width = pad_x * 2 + rank_w + flag_gap + flag_w + flag_gap + name_w + col_gap + score_w
         _, _, centre_y, _ = self._title_char_select_bounds()
-        min_top = title_bottom + 4
-        max_bot = self._title_footer_help_y() - 8
-        avail = max(40, max_bot - min_top)
+        min_top = title_bottom + 4 * P
+        max_bot = self._title_footer_help_y() - 8 * P
+        avail = max(40 * P, max_bot - min_top)
 
         def unit_height(row_h: int) -> tuple[int, int]:
             offline_extra = row_h if status == "offline" else 0
             panel_h = pad_y * 2 + row_h * TOP_N + offline_extra
             return heading.get_height() + head_gap + panel_h, panel_h
 
-        row_h = 14
+        row_h = 14 * P
         unit_h, panel_h = unit_height(row_h)
-        while unit_h > avail and row_h > 10:
+        while unit_h > avail and row_h > 10 * P:
             row_h -= 1
             unit_h, panel_h = unit_height(row_h)
 
@@ -4280,7 +4383,7 @@ class Game:
 
         panel = _new_rgba((width, panel_h))
         panel.fill((36, 24, 16, 215))
-        pygame.draw.rect(panel, (255, 220, 120, 255), panel.get_rect(), 2)
+        pygame.draw.rect(panel, (255, 220, 120, 255), panel.get_rect(), 2 * P)
         x_rank = pad_x
         x_flag = x_rank + rank_w + flag_gap
         x_name = x_flag + flag_w + flag_gap
@@ -4297,7 +4400,7 @@ class Game:
                 flag = self.flags.get(country) if country else None
                 if flag is not None:
                     fy = y + (font.get_height() - flag.get_height()) // 2
-                    pygame.draw.rect(panel, (20, 14, 10, 255), (x_flag - 1, fy - 1, flag.get_width() + 2, flag.get_height() + 2))
+                    pygame.draw.rect(panel, (20, 14, 10, 255), (x_flag - P, fy - P, flag.get_width() + 2 * P, flag.get_height() + 2 * P))
                     panel.blit(flag, (x_flag + (flag_w - flag.get_width()) // 2, fy))
                 elif country:  # not downloaded (yet): the code, muted
                     c = self.font_title_copy.render(country, True, (150, 134, 104))
@@ -4309,13 +4412,15 @@ class Game:
                 panel.blit(v, (x_score - v.get_width(), y))
         if status == "offline":
             t = self.font_title_copy.render("Offline - showing saved scores", True, dim)
-            panel.blit(t, ((width - t.get_width()) // 2, pad_y + row_h * TOP_N + 2))
+            panel.blit(t, ((width - t.get_width()) // 2, pad_y + row_h * TOP_N + 2 * P))
         screen.blit(_finish_rgba(panel), ((self.view_w - width) // 2, panel_top))
 
-    def _draw_title_portraits(self, screen):
+    def _draw_title_portraits(self, screen, now: float = 0.0):
         # Portraits — boxes sized for the larger title fonts (name under each).
-        pad_x, pad_top, pad_bot = 20, 14, 34
-        gap = 44
+        # The chosen one walks on the spot (their walk cycle), the other stands.
+        P = PX
+        pad_x, pad_top, pad_bot = 20 * P, 14 * P, 34 * P
+        gap = 44 * P
         portraits = []
         for i, cid in enumerate(CHAR_ORDER):
             portraits.append((cid, self.char_sets[cid]))
@@ -4335,14 +4440,16 @@ class Game:
             frame = _new_rgba((bw, bh))
             frame.fill((36, 24, 16, 210 if selected else 150))
             border = (255, 220, 120, 255) if selected else (140, 110, 70, 180)
-            pygame.draw.rect(frame, border, frame.get_rect(), 2 if selected else 1)
+            pygame.draw.rect(frame, border, frame.get_rect(), (2 if selected else 1) * P)
             frame = _finish_rgba(frame)
             screen.blit(frame, (bx, by))
-            screen.blit(img, (x0, y0))
-            screen.blit(name, (x0 + (img.get_width() - name.get_width()) // 2, y0 + img.get_height() + 8))
+            ax, ay = cs["anchors"]["se"]
+            phase = (now / 1000.0 * 1.1) % 1.0 if selected else None
+            self._blit_char(screen, cs, "se", int(round(x0 + ax)), int(round(y0 + ay)), phase)
+            screen.blit(name, (x0 + (img.get_width() - name.get_width()) // 2, y0 + img.get_height() + 8 * P))
             if selected:
                 mark = self.font_title_sel.render("SELECTED", True, (255, 220, 120))
-                screen.blit(mark, (bx + (bw - mark.get_width()) // 2, by - 14))
+                screen.blit(mark, (bx + (bw - mark.get_width()) // 2, by - 14 * P))
             x0 += img.get_width() + pad_x * 2 + gap
 
     def _draw_title_footer(self, screen):
@@ -4352,17 +4459,17 @@ class Game:
             "In game: Left/Right turn, Up/Down step, H Chameleon Cloak",
         ]
         # Copyright at the very bottom (wrapped); controls sit just above it.
-        copy_margin = 8
-        copy_gap = 10  # line height for size-8 font on the low-res view
+        copy_margin = 8 * PX
+        copy_gap = 10 * PX  # line height for the size-8 font
         copy_lines = _wrap_text(self.font_title_copy, TITLE_COPYRIGHT, self.view_w - copy_margin * 2)
         copy_block_h = copy_gap * len(copy_lines)
-        copy_y0 = self.view_h - 6 - copy_block_h
+        copy_y0 = self.view_h - 6 * PX - copy_block_h
         help_y = self._title_footer_help_y()
         y = help_y
         for line in lines:
             t = self.font_title_help.render(line, True, (230, 214, 180))
             screen.blit(t, ((self.view_w - t.get_width()) // 2, y))
-            y += 14
+            y += 14 * PX
         for i, line in enumerate(copy_lines):
             t = self.font_title_copy.render(line, True, (180, 165, 130))
             screen.blit(t, ((self.view_w - t.get_width()) // 2, copy_y0 + i * copy_gap))
@@ -4383,6 +4490,7 @@ def parse_args(argv):
     parser.add_argument("--demo-scores", action="store_true",
                         help="debug: fill the Top 10 with sample names (shown only, never sent)")
     parser.add_argument("--offline", action="store_true", help="never contact the online leaderboard")
+    parser.add_argument("--fullscreen", action="store_true", help="start full screen (F toggles)")
     parser.add_argument("--host", action="store_true",
                         help="network: host a two-player game straight away (as --character)")
     parser.add_argument("--join", type=str, default=None, metavar="HOST[:PORT]",
@@ -4437,7 +4545,14 @@ def main(argv=None):
         pass
     pygame.init()
     pygame.display.set_caption("Daleks in Hedges")
-    screen = pygame.display.set_mode((WIN_W, WIN_H))
+    # A 1280x720 window (pygame.SCALED: the desktop scales it, crisp on
+    # Retina); --fullscreen starts full screen, F toggles in play.
+    if args.screenshot is not None or args.frames is not None or args.scene is not None:
+        screen = pygame.display.set_mode((WIN_W, WIN_H))
+    elif args.fullscreen:
+        screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.FULLSCREEN | pygame.SCALED)
+    else:
+        screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.SCALED)
     skip_title = args.no_title or args.scene is not None or args.frames is not None or args.screenshot is not None
     if args.scene in ("title", "title_top10"):
         skip_title = False
@@ -4479,6 +4594,8 @@ def main(argv=None):
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE and not game.wants_text():
                         running = False
+                    elif event.key == pygame.K_f and not game.wants_text():
+                        pygame.display.toggle_fullscreen()
                     else:
                         game.on_key(event.key, now, getattr(event, "unicode", ""))
             if not running:

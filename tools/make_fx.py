@@ -40,6 +40,7 @@ def save_png(arr: np.ndarray, name: str):
     print("wrote", os.path.relpath(path, ROOT), f"{w}x{h}")
 
 
+SCALE = 2     # assets are drawn for the 1280x720 full-resolution view (2x the old pixels)
 CLOAK_SS = 4  # supersampling per axis for the cloak badge (4x4 = 16 samples a pixel)
 
 
@@ -53,12 +54,13 @@ def chameleon_cloak(ss: int = CLOAK_SS):
     """
     W, H = 48, 56
     # Sample coordinates in pixel units: pixel i spans i-0.5 .. i+0.5.
-    sy = (np.arange(H * ss) + 0.5) / ss - 0.5
-    sx = (np.arange(W * ss) + 0.5) / ss - 0.5
+    # (in the badge's original 48x56 units; the output is SCALE times larger)
+    sy = (np.arange(H * SCALE * ss) + 0.5) / (ss * SCALE) - 0.5
+    sx = (np.arange(W * SCALE * ss) + 0.5) / (ss * SCALE) - 0.5
     yy, xx = np.meshgrid(sy, sx, indexing="ij")
     cx, cy = W / 2, H / 2 - 2
-    rgb = np.zeros((H * ss, W * ss, 3), np.float64)
-    alpha = np.zeros((H * ss, W * ss), np.float64)
+    rgb = np.zeros((H * SCALE * ss, W * SCALE * ss, 3), np.float64)
+    alpha = np.zeros((H * SCALE * ss, W * SCALE * ss), np.float64)
 
     def paint(mask, colour):
         rgb[mask] = colour
@@ -80,6 +82,7 @@ def chameleon_cloak(ss: int = CLOAK_SS):
     for px, py in ((cx - 12, cy - 14), (cx + 12, cy - 14), (cx - 12, cy + 12), (cx + 12, cy + 12)):
         paint((xx - px) ** 2 + (yy - py) ** 2 <= 4, (212, 180, 90))
     # Box-filter down to W x H, premultiplied so edges don't pick up black.
+    H, W = H * SCALE, W * SCALE
     pre = (rgb * alpha[..., None]).reshape(H, ss, W, ss, 3).mean(axis=(1, 3))
     a = alpha.reshape(H, ss, W, ss).mean(axis=(1, 3))
     out = np.zeros((H, W, 4), np.uint8)
@@ -92,7 +95,7 @@ def main() -> int:
     os.makedirs(FX_DIR, exist_ok=True)
     pygame.init()
     # The TARDIS roof-lamp glow (start and exit dematerialisation).
-    save_png(radial_glow(11, (255, 236, 190)), "lamp_glow.png")
+    save_png(radial_glow(11 * SCALE, (255, 236, 190)), "lamp_glow.png")
     save_png(chameleon_cloak(), "chameleon_cloak.png")
     pygame.quit()
     return 0
