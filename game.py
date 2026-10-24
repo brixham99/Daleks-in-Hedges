@@ -39,10 +39,19 @@ import net
 # PX: everything is drawn at the full 1280x720 resolution, at twice the
 # pixel sizes of the old 640x360-style view (which was nearest-scaled 2x).
 PX = 2
-TILE_W = 64 * PX
-TILE_H = 32 * PX
-HEDGE_H = 40 * PX
-SPRITE_H = 74 * PX            # Archie/Holly height on screen (the Haunted Mansion art, scaled)
+WORLD_ZOOM = 1280 / 1100   # world drawn this much larger than the UI (~1100 px of world across)
+WPX = PX * WORLD_ZOOM
+
+
+def WL(n: float) -> int:
+    """A world length from the old low-res view, in screen pixels."""
+    return int(round(n * WPX))
+
+
+TILE_H = WL(32)
+TILE_W = 2 * TILE_H          # strict 2:1
+HEDGE_H = WL(40)
+SPRITE_H = WL(74)            # Archie/Holly height on screen (the Haunted Mansion art, scaled)
 MOVE_MS = 150
 TURN_MS = 220
 BUMP_MS = 110
@@ -97,8 +106,8 @@ LAMP_GLOW_FILE = os.path.join(HERE, "assets", "fx", "lamp_glow.png")  # tools/ma
 CLOAK_FILE = os.path.join(HERE, "assets", "fx", "chameleon_cloak.png")
 
 # --- Daleks, the TARDIS and the Chameleon Cloak (pre-zoom pixels, ms) ---
-DALEK_H = 86 * PX                # Archie is SPRITE_H = 74
-TARDIS_H = 124 * PX
+DALEK_H = WL(86)                # Archie is SPRITE_H = 74
+TARDIS_H = WL(124)
 NUM_DALEKS = 3               # on level 1; each level adds two more ...
 DALEKS_PER_LEVEL = 2
 MAX_DALEKS = 15              # ... up to this many (the 41x41 maze stays fair)
@@ -109,7 +118,7 @@ DALEK_TELEGRAPH_MS = 350     # eye-stalk glow before the shot
 DALEK_MIN_START_DIST = 12    # path distance from Archie's start
 DALEK_MIN_EXIT_DIST = 10     # path distance from the exit
 LASER_MS = 450               # how long the beam stays on screen
-LASER_WIDTHS = (8, 6, 4, 2)  # px at 1280x720
+LASER_WIDTHS = tuple(max(1, WL(w / 2)) for w in (8, 6, 4, 2))  # px at 1280x720
 LASER_COLOURS = ((30, 70, 190), (70, 140, 250), (160, 210, 255), (255, 255, 255))
 LASER_HOT = ((40, 95, 225), (110, 175, 255), (200, 232, 255), (255, 255, 255))  # flicker frames
 LASER_TIP_GLOW = ((70, 140, 250), (170, 220, 255), (255, 255, 255))  # solid circles, outside in
@@ -418,7 +427,7 @@ def _tileable_noise(size: int, cells: int, rng: np.random.Generator) -> np.ndarr
     return top * (1.0 - yf)[:, None] + bot * yf[:, None]
 
 
-def make_dirt_texture(size: int = 160 * PX) -> pygame.Surface:
+def make_dirt_texture(size: int = WL(160)) -> pygame.Surface:
     """One tileable mottled-soil texture: browns, clumps, pebbles, specks."""
     rng = np.random.default_rng(7)
     n1 = _tileable_noise(size, 6, rng)
@@ -437,7 +446,7 @@ def make_dirt_texture(size: int = 160 * PX) -> pygame.Surface:
     soil = np.array([58, 36, 22], dtype=np.float32)
     colour = colour * (1.0 - 0.45 * damp) + soil * (0.45 * damp)
     img = np.clip(colour, 0, 255).astype(np.uint8)
-    for _ in range(220 * PX * PX):
+    for _ in range(int(220 * WPX * WPX)):
         x = int(rng.integers(0, size))
         y = int(rng.integers(0, size))
         if rng.random() < 0.55:
@@ -446,14 +455,14 @@ def make_dirt_texture(size: int = 160 * PX) -> pygame.Surface:
                 int(rng.integers(102, 140)),
                 int(rng.integers(88, 120)),
             )
-            rad = (1 if rng.random() < 0.75 else 2) * PX
+            rad = max(1, int(round((1 if rng.random() < 0.75 else 2) * WPX)))
         else:
             tint = (
                 int(rng.integers(70, 120)),
                 int(rng.integers(46, 78)),
                 int(rng.integers(28, 48)),
             )
-            rad = PX // 2
+            rad = max(1, int(WPX // 2))
         for dy in range(-rad, rad + 1):
             for dx in range(-rad, rad + 1):
                 if dx * dx + dy * dy > rad * rad:
@@ -461,8 +470,8 @@ def make_dirt_texture(size: int = 160 * PX) -> pygame.Surface:
                 img[(y + dy) % size, (x + dx) % size] = tint
     # Fine specks, wrapping so the texture still tiles.
     speck = rng.random((size, size))
-    hi = speck > 1.0 - 0.008 / PX
-    lo = (speck > 1.0 - 0.016 / PX) & ~hi
+    hi = speck > 1.0 - 0.008 / WPX
+    lo = (speck > 1.0 - 0.016 / WPX) & ~hi
     img[hi] = np.array([186, 154, 110], dtype=np.uint8)
     img[lo] = np.array([64, 42, 28], dtype=np.uint8)
     surf = pygame.surfarray.make_surface(np.transpose(img, (1, 0, 2)))
@@ -485,15 +494,15 @@ def _feet_anchor(image: pygame.Surface):
 def build_dirt_variants(texture: pygame.Surface):
     """Clip the dirt texture into diamond tiles with varied sample offsets."""
     tw, th = texture.get_size()
-    sw, sh = 72 * PX, 40 * PX
+    sw, sh = WL(72), WL(40)
     cx, cy = sw / 2, sh / 2
     hw = TILE_W // 2
     hh = TILE_H // 2
     raw = (
-        (cx, cy - hh - PX),
-        (cx + hw + PX, cy),
-        (cx, cy + hh + PX),
-        (cx - hw - PX, cy),
+        (cx, cy - hh - WPX),
+        (cx + hw + WPX, cy),
+        (cx, cy + hh + WPX),
+        (cx - hw - WPX, cy),
     )
 
     def grow(points, amount):
@@ -504,7 +513,7 @@ def build_dirt_variants(texture: pygame.Surface):
             out.append((x + dx / length * amount, y + dy / length * amount))
         return out
 
-    fill_pts = grow(raw, 1.6 * PX)
+    fill_pts = grow(raw, WL(1.6))
     mask = _new_rgba((sw, sh))
     pygame.draw.polygon(mask, (255, 255, 255, 255), fill_pts)
     mask_alpha = pygame.surfarray.array_alpha(mask)
@@ -523,7 +532,7 @@ def build_dirt_variants(texture: pygame.Surface):
         alpha = pygame.surfarray.pixels_alpha(base)
         alpha[:] = mask_alpha
         del alpha
-        pygame.draw.polygon(base, DIRT_EDGE, raw, PX)
+        pygame.draw.polygon(base, DIRT_EDGE, raw, WL(1))
         shades = []
         for factor in DIRT_SHADES:
             shaded = base.copy()
@@ -539,9 +548,9 @@ N_HEDGE = 16
 N_HEDGE_SHADES = 8
 HEDGE_FOG_LO = 0.88  # same range as Game._fog
 HEDGE_FOG_HI = 1.02
-HEDGE_PAD_X = 6 * PX
-HEDGE_PAD_TOP = 9 * PX
-HEDGE_PAD_BOT = 4 * PX
+HEDGE_PAD_X = WL(6)
+HEDGE_PAD_TOP = WL(9)
+HEDGE_PAD_BOT = WL(4)
 HEDGE_SW = TILE_W + 2 * HEDGE_PAD_X
 HEDGE_SH = HEDGE_PAD_TOP + HEDGE_H + TILE_H + HEDGE_PAD_BOT
 HEDGE_OX = HEDGE_PAD_X + TILE_W // 2          # sprite x of the tile's top vertex
@@ -549,8 +558,8 @@ HEDGE_OY = HEDGE_PAD_TOP + HEDGE_H            # sprite y of the tile's top verte
 # Leaves at full resolution: a bit smaller than a straight 2x and more of
 # them, so the hedges gain detail rather than just getting bigger.
 LEAF_SCALE = 1.5
-LEAF_DENSITY = (PX / LEAF_SCALE) ** 2
-_SIDE = 32.0 * PX                              # world units along one tile edge (1 unit = 1 px)
+LEAF_DENSITY = (WPX / LEAF_SCALE) ** 2
+_SIDE = WL(32.0)                              # world units along one tile edge (1 unit = 1 px)
 
 # View-space normals (x right, y down, z toward the viewer) and the light.
 _N_TOP = np.array([0.0, -0.866, 0.5])
@@ -568,10 +577,10 @@ def _project(u, v, w):
 
 
 def _mounds(rng, count, amp):
-    cu = rng.uniform(-4 * PX, _SIDE + 4 * PX, count)
-    cv = rng.uniform(-4 * PX, _SIDE + 4 * PX, count)
-    sig = rng.uniform(5.0, 10.0, count) * PX
-    a = rng.uniform(-0.4, 1.0, count) * amp * PX
+    cu = rng.uniform(-WL(4), _SIDE + WL(4), count)
+    cv = rng.uniform(-WL(4), _SIDE + WL(4), count)
+    sig = rng.uniform(5.0, 10.0, count) * WPX
+    a = rng.uniform(-0.4, 1.0, count) * amp * WPX
 
     def field(u, v):
         out = np.zeros_like(u)
@@ -603,18 +612,18 @@ def render_hedge_variant(index: int, seed: int = 4242) -> np.ndarray:
 
     def add(face, n):
         n = int(round(n * LEAF_DENSITY))
-        o = rng.uniform(-2.8, 1.6, n) * PX
+        o = rng.uniform(-2.8, 1.6, n) * WPX
         if face == 0:     # top: plane w = HEDGE_H
-            u = rng.uniform(-1.2 * PX, _SIDE + 1.2 * PX, n)
-            v = rng.uniform(-1.2 * PX, _SIDE + 1.2 * PX, n)
+            u = rng.uniform(-WL(1.2), _SIDE + WL(1.2), n)
+            v = rng.uniform(-WL(1.2), _SIDE + WL(1.2), n)
             w = HEDGE_H + top_bump(u, v) + o
         elif face == 1:   # left (SW) face: plane v = SIDE
-            u = rng.uniform(-0.8 * PX, _SIDE + 0.8 * PX, n)
-            w = rng.uniform(-1.0 * PX, HEDGE_H + 0.5 * PX, n)
+            u = rng.uniform(-WL(0.8), _SIDE + WL(0.8), n)
+            w = rng.uniform(-WL(1.0), HEDGE_H + WL(0.5), n)
             v = _SIDE + left_bump(u, w) * 0.7 + o * 0.8
         else:             # right (SE) face: plane u = SIDE
-            v = rng.uniform(-0.8 * PX, _SIDE + 0.8 * PX, n)
-            w = rng.uniform(-1.0 * PX, HEDGE_H + 0.5 * PX, n)
+            v = rng.uniform(-WL(0.8), _SIDE + WL(0.8), n)
+            w = rng.uniform(-WL(1.0), HEDGE_H + WL(0.5), n)
             u = _SIDE + right_bump(v, w) * 0.7 + o * 0.8
         leaves.append((u, v, w, np.full(n, face), o))
 
@@ -672,8 +681,8 @@ def render_hedge_variant(index: int, seed: int = 4242) -> np.ndarray:
     # Leaf colour.
     t = np.clip(rng.beta(2.2, 2.0, n), 0, 1)
     face_gain = np.where(face == 0, 1.04, np.where(face == 1, 0.70, 0.84))
-    ao = 0.55 + 0.45 * np.clip((off / PX + 2.8) / 4.4, 0, 1)
-    ground = np.where(face > 0, 0.55 + 0.45 * np.clip(w / (16.0 * PX), 0, 1), 1.0)
+    ao = 0.55 + 0.45 * np.clip((off / WPX + 2.8) / 4.4, 0, 1)
+    ground = np.where(face > 0, 0.55 + 0.45 * np.clip(w / (WL(16.0)), 0, 1), 1.0)
     jitter = rng.uniform(0.9, 1.1, n)
     base = leaf_dark[None, :] * (1 - t[:, None]) + leaf_light[None, :] * t[:, None]
     # A few young, yellow-green leaves on top.
@@ -1605,10 +1614,10 @@ class Game:
         self.tardis_k = tk
         self.tardis_anchor = _base_anchor(self.tardis)
         self.tardis_lamp = ((TARDIS_LAMP_SRC[0] + 0.5) * tk, (TARDIS_LAMP_SRC[1] + 0.5) * tk)
-        self.dalek_shadow = _new_rgba((50 * PX, 18 * PX))
+        self.dalek_shadow = _new_rgba((WL(50), WL(18)))
         pygame.draw.ellipse(self.dalek_shadow, (30, 20, 10, 120), self.dalek_shadow.get_rect())
         self.dalek_shadow = _finish_rgba(self.dalek_shadow)
-        self.tardis_shadow = _new_rgba((76 * PX, 30 * PX))
+        self.tardis_shadow = _new_rgba((WL(76), WL(30)))
         pygame.draw.ellipse(self.tardis_shadow, (24, 16, 8, 110), self.tardis_shadow.get_rect())
         self.tardis_shadow = _finish_rgba(self.tardis_shadow)
         # Dematerialisation: pre-faded TARDIS and shadow (alpha copied exactly,
@@ -1618,17 +1627,17 @@ class Game:
         if os.path.exists(LAMP_GLOW_FILE):
             lamp = pygame.image.load(LAMP_GLOW_FILE).convert_alpha()
         else:  # (run tools/make_fx.py to write it)
-            lamp = _make_glow(11 * PX, (255, 236, 190))
+            lamp = _make_glow(WL(11), (255, 236, 190))
         self.demat_lamps = [_alpha_scaled(lamp, i / 11) for i in range(12)]
-        self.scorch = _new_rgba((34 * PX, 14 * PX))
+        self.scorch = _new_rgba((WL(34), WL(14)))
         pygame.draw.ellipse(self.scorch, (20, 12, 6, 170), self.scorch.get_rect())
-        pygame.draw.ellipse(self.scorch, (10, 6, 4, 200), self.scorch.get_rect().inflate(-14 * PX, -6 * PX))
+        pygame.draw.ellipse(self.scorch, (10, 6, 4, 200), self.scorch.get_rect().inflate(-WL(14), -WL(6)))
         self.scorch = _finish_rgba(self.scorch)
         self.puffs = []  # puffs[size][alpha level], pre-faded
-        for radius in (2 * PX, 3 * PX, 4 * PX, 5 * PX, 6 * PX):
+        for radius in (WL(2), WL(3), WL(4), WL(5), WL(6)):
             puff = _new_rgba((radius * 2 + 2, radius * 2 + 2))
             pygame.draw.circle(puff, (214, 236, 190, 255), (radius + 1, radius + 1), radius)
-            pygame.draw.circle(puff, (246, 252, 236, 255), (radius - PX // 2, radius - PX // 2), max(1, radius - 2 * PX))
+            pygame.draw.circle(puff, (246, 252, 236, 255), (radius - WL(0.5), radius - WL(0.5)), max(1, radius - WL(2)))
             puff = _finish_rgba(puff)
             self.puffs.append([_alpha_scaled(puff, i / (PUFF_LEVELS - 1)) for i in range(PUFF_LEVELS)])
         self.disguise_cache = {}
@@ -3023,7 +3032,7 @@ class Game:
         return float(self.col), float(self.row)
 
     def _visible_tiles(self, cam_x, cam_y):
-        margin_x = TILE_W + 8 * PX
+        margin_x = TILE_W + WL(8)
         margin_top = HEDGE_H + TILE_H
         margin_bottom = TILE_H * 2
         tiles = []
@@ -3100,7 +3109,7 @@ class Game:
         # Feet sit near the centre; looking a little above them puts his body
         # just above centre. The maze scrolls; tiles are not yaw-rotated.
         cam_x = look_x - self.view_w / 2
-        cam_y = (look_y - 46 * PX) - self.view_h / 2
+        cam_y = (look_y - WL(46)) - self.view_h / 2
         self.cam = (cam_x, cam_y)
         tiles = self._visible_tiles(cam_x, cam_y)
 
@@ -3179,7 +3188,7 @@ class Game:
         fx -= cam_x
         fy += TILE_H // 2 - cam_y
         img = self.tardis
-        if fx < -img.get_width() or fx > self.view_w + img.get_width() or fy < -40 * PX or fy > self.view_h + img.get_height():
+        if fx < -img.get_width() or fx > self.view_w + img.get_width() or fy < -WL(40) or fy > self.view_h + img.get_height():
             return
         if self.exit_demat_t0 is not None:
             alpha, lamp = self._demat_curve(now - self.exit_demat_t0)
@@ -3194,7 +3203,7 @@ class Game:
         ax, ay = self.tardis_anchor
         if level > 0:
             sh = self.demat_shadows[level]
-            screen.blit(sh, (int(fx - sh.get_width() / 2), int(fy - sh.get_height() / 2 + 2 * PX)))
+            screen.blit(sh, (int(fx - sh.get_width() / 2), int(fy - sh.get_height() / 2 + WL(2))))
             screen.blit(self.demat_fades[level], (int(round(fx - ax)), int(round(fy - ay))))
         li = int(round(lamp * 11))
         if li > 0:
@@ -3243,7 +3252,7 @@ class Game:
         fx -= cam_x
         fy += TILE_H // 2 - cam_y
         img_w, img_h = self.tardis.get_size()
-        if fx < -img_w or fx > self.view_w + img_w or fy < -40 * PX or fy > self.view_h + img_h:
+        if fx < -img_w or fx > self.view_w + img_w or fy < -WL(40) or fy > self.view_h + img_h:
             return
         self._blit_tardis(screen, fx, fy, alpha, lamp)
 
@@ -3255,7 +3264,7 @@ class Game:
         fx = int(round(fx - cam_x))
         fy = int(round(fy + TILE_H // 2 - cam_y))
         o.feet = (fx, fy)
-        if fx < -80 * PX or fx > self.view_w + 80 * PX or fy < -20 * PX or fy > self.view_h + SPRITE_H + 20 * PX:
+        if fx < -WL(80) or fx > self.view_w + WL(80) or fy < -WL(20) or fy > self.view_h + SPRITE_H + WL(20):
             return
         key = FACING_SPRITE[o.facing]
         sprite = cs["sprites"][key]
@@ -3263,7 +3272,7 @@ class Game:
         pos = (int(round(fx - ax)), int(round(fy - ay)))
         if o.dead:
             t = now - o.death_t0
-            screen.blit(self.scorch, (fx - self.scorch.get_width() // 2, fy - 7 * PX))
+            screen.blit(self.scorch, (fx - self.scorch.get_width() // 2, fy - WL(7)))
             ghosts = cs["white"][key]
             if t < LASER_MS:
                 screen.blit(ghosts[0] if int(t / 45) % 2 == 0 else sprite, pos)
@@ -3354,13 +3363,13 @@ class Game:
         fx = int(round(fx - cam_x))
         fy = int(round(fy + TILE_H // 2 - cam_y))
         d.feet = (fx, fy)
-        if fx < -80 * PX or fx > self.view_w + 80 * PX or fy < -20 * PX or fy > self.view_h + DALEK_H + 20 * PX:
+        if fx < -WL(80) or fx > self.view_w + WL(80) or fy < -WL(20) or fy > self.view_h + DALEK_H + WL(20):
             return
         key = d.sprite_key(now)
         img = self.dalek_sprites[key]
         ax, ay = self.dalek_anchor[key]
         sh = self.dalek_shadow
-        screen.blit(sh, (fx - sh.get_width() // 2, fy - sh.get_height() // 2 + PX))
+        screen.blit(sh, (fx - sh.get_width() // 2, fy - sh.get_height() // 2 + WL(1)))
         screen.blit(img, (int(round(fx - ax)), int(round(fy - ay))))
 
     def _dalek_point(self, d: Dalek, now: float, table):
@@ -3389,12 +3398,12 @@ class Game:
         if not 0.0 <= t <= 1.0:
             return
         alpha = int(235 * (1.0 - t) ** 1.3)
-        reach = (6 + 22 * ease(t)) * PX
+        reach = (6 + 22 * ease(t)) * WPX
         for i in range(12):
             ang = i * (math.tau / 12) + (i % 3) * 0.35
             r = reach * (0.75 + 0.25 * ((i * 7) % 5) / 4)
             px = fx + math.cos(ang) * r
-            py = fy - 18 * PX + math.sin(ang) * r * 0.6
+            py = fy - WL(18) + math.sin(ang) * r * 0.6
             sizes = self.puffs[max(0, min(4, 4 - int(t * 4) + (i % 2) - 1))]
             puff = sizes[max(0, min(PUFF_LEVELS - 1, round(alpha / 255 * (PUFF_LEVELS - 1))))]
             screen.blit(puff, (int(px - puff.get_width() / 2), int(py - puff.get_height() / 2)))
@@ -3407,7 +3416,7 @@ class Game:
         phase = None if self.dead else self._walk_phase(now)
         if self.dead:
             t = now - self.death_t0
-            screen.blit(self.scorch, (feet_sx - self.scorch.get_width() // 2, feet_sy - 7 * PX))
+            screen.blit(self.scorch, (feet_sx - self.scorch.get_width() // 2, feet_sy - WL(7)))
             ghosts = self.white[key]
             if t < LASER_MS:
                 screen.blit(ghosts[0] if int(t / 45) % 2 == 0 else sprite, pos)
@@ -3447,15 +3456,15 @@ class Game:
 
     def _draw_peek_eyes(self, screen, fx: int, fy: int, now: float):
         """Two little eyes peeping over the hedge so the player can find him."""
-        P = PX
+        P = WPX
         y = fy - 32 * P
         if (now - self.disguise_t0) % 2600 > 2470:  # blink
             for ex in (fx - 7 * P, fx + 2 * P):
-                pygame.draw.line(screen, (18, 36, 16), (ex, y + 2 * P), (ex + 4 * P, y + 2 * P), P)
+                pygame.draw.line(screen, (18, 36, 16), (ex, y + 2 * P), (ex + 4 * P, y + 2 * P), WL(1))
             return
         look = 2 if self.facing in (DIR_SE, DIR_NE) else 0
         for ex in (fx - 7 * P, fx + 2 * P):
-            pygame.draw.rect(screen, (18, 36, 16), (ex - P, y - P, 7 * P, 6 * P), border_radius=P)
+            pygame.draw.rect(screen, (18, 36, 16), (ex - P, y - P, 7 * P, 6 * P), border_radius=WL(1))
             pygame.draw.ellipse(screen, (248, 248, 238), (ex, y, 5 * P, 4 * P))
             pygame.draw.ellipse(screen, (24, 20, 16), (ex + (1 + look // 2) * P, y + P, 2 * P, 2 * P))
 
@@ -3474,7 +3483,7 @@ class Game:
                 u = max(0.0, min(1.0, (now - d.aim_t0) / max(1.0, d.fire_at - d.aim_t0)))
                 ex, ey = self._dalek_point(d, now, self.dalek_eye)
                 flick = 0.75 + 0.25 * math.sin(now * 0.06)
-                self._solid_glow(screen, ex, ey, (2.0 + 4.0 * u) * flick * PX, EYE_GLOW)
+                self._solid_glow(screen, ex, ey, (2.0 + 4.0 * u) * flick * WPX, EYE_GLOW)
             if d.state == "aim" or (d.state == "fire" and now - d.fire_t0 < LASER_MS + 400):
                 self._draw_shout(screen, d, now)
         if self.dead and self.shooter is not None:
@@ -3482,17 +3491,17 @@ class Game:
             if t < LASER_MS:
                 gx, gy = self._dalek_point(self.shooter, now, self.dalek_gun)
                 fx, fy = self.archie_feet
-                self._draw_laser(screen, (gx, gy), (fx, fy - 34 * PX), now, t)
+                self._draw_laser(screen, (gx, gy), (fx, fy - WL(34)), now, t)
         o = self.other
         if o is not None and o.dead and o.shooter is not None and o.shooter in self.daleks:
             t = now - o.death_t0
             if 0 <= t < LASER_MS:
                 gx, gy = self._dalek_point(o.shooter, now, self.dalek_gun)
-                self._draw_laser(screen, (gx, gy), (o.feet[0], o.feet[1] - 34 * PX), now, t)
+                self._draw_laser(screen, (gx, gy), (o.feet[0], o.feet[1] - WL(34)), now, t)
 
     def _draw_shout(self, screen, d: Dalek, now: float):
         fx, fy = d.feet
-        x, y = fx, fy - DALEK_H - 6 * PX
+        x, y = fx, fy - DALEK_H - WL(6)
         jig = int(math.sin(now * 0.05) * 1.5 * PX)
         text = "EXTERMINATE!"
         fg = self.font_shout.render(text, True, (255, 236, 120))
@@ -3527,8 +3536,8 @@ class Game:
             w = int(round(width * j * fade))
             if w >= 1:
                 pygame.draw.line(screen, colour, a, b, w)
-        self._solid_glow(screen, a[0], a[1], 4.0 * PX * j * fade, LASER_TIP_GLOW)
-        self._solid_glow(screen, b[0], b[1], 5.0 * PX * rng.uniform(0.8, 1.15) * fade, LASER_HIT_GLOW)
+        self._solid_glow(screen, a[0], a[1], 4.0 * WPX * j * fade, LASER_TIP_GLOW)
+        self._solid_glow(screen, b[0], b[1], 5.0 * WPX * rng.uniform(0.8, 1.15) * fade, LASER_HIT_GLOW)
 
     def _draw_cloak_hud(self, screen, now: float):
         """Chameleon Cloak device with charge meter (bottom-right of the view)."""
