@@ -100,7 +100,13 @@ WALK_IDLE_MS = 90             # stopped this long: back to the standing frame an
 CHAR_ORDER = ("archie", "holly")
 TITLE_DALEKS = 10             # decorative Daleks on the title screen
 
-DALEK_FILES = {k: os.path.join(HERE, "assets", f"dalek_{k}.png") for k in ("se", "sw", "ne", "nw")}
+# Four Dalek designs, one per level in turn (level 1 Original, 2 Movie, 3 2005,
+# 4 2010, 5 Original again ...). Rendered by tools/make_daleks.py: a sprite
+# per design for SE and NE (SW/NW mirrored), a "_lit" overlay of the dome
+# lights lit, and daleks.json with the gun, eye and feet points.
+DALEK_DIR = os.path.join(HERE, "assets", "daleks")
+DALEK_LAMP_LEVELS = 8          # pre-faded copies of each lit-lamp overlay
+DALEK_LAMP_ENV_MS = 20         # speech envelope frame for the dome lights
 TARDIS_FILE = os.path.join(HERE, "assets", "tardis.png")
 LAMP_GLOW_FILE = os.path.join(HERE, "assets", "fx", "lamp_glow.png")  # tools/make_fx.py
 CLOAK_FILE = os.path.join(HERE, "assets", "fx", "chameleon_cloak.png")
@@ -144,10 +150,6 @@ def cloak_recharge_ms(hidden_ms: float) -> float:
     return max(DISGUISE_MIN_COOLDOWN_MS, DISGUISE_COOLDOWN_MS * frac)
 POOF_MS = 280
 DISGUISE_SCALE = 0.86
-# Gun tip and eye-stalk tip in the 160 px source images. SW/NW are exact
-# mirror images of SE/NE, so their points are mirrored at load time.
-DALEK_GUN_SRC = {"se": (95, 76), "ne": (103, 47)}
-DALEK_EYE_SRC = {"se": (79, 30), "ne": (77, 5)}
 DALEK_SPACING = (12, 10, 8, 6, 4, 2)  # wanted gap between Daleks, relaxed in turn
 # The TARDIS that dropped Archie off dematerialises behind him at the start.
 DEMAT_WAIT_MS = 5000         # it stands solid for 5 s before it starts to go
@@ -295,6 +297,14 @@ NET_JOIN_WAIT_S = 6.0          # no answer from a host in this long: back to the
 DALEK_STATES = ("roam", "aim", "fire")
 REMOTE_SOUND_GAIN = 0.7       # the other player's steps, bumps and cloak: a bit quieter than yours
 DALEK_RECOVER_MS = 1200        # network game: after a kill the shooter patrols again (the other player lives on)
+
+# Secret: hold Y, U and a number key together in play to jump to that level
+# (1-9, 0 = 10): a fresh maze with that level's Daleks, no level bonus paid
+# for the skipped levels. Once per press; single player only.
+LEVEL_KEYS = (pygame.K_y, pygame.K_u)
+LEVEL_DIGITS = {getattr(pygame, f"K_{i}"): (i or 10) for i in range(10)}
+LEVEL_DIGITS.update({getattr(pygame, f"K_KP{i}"): (i or 10) for i in range(10)})
+LEVEL_DEBOUNCE_MS = 300
 
 # Secret: hold I and M together for over 2 s in play and the maze fills to 30
 # Daleks (once per hold). A challenge only: scoring is unchanged. In a network
@@ -825,6 +835,41 @@ def _despill(image: pygame.Surface) -> pygame.Surface:
     rgb[..., 2] = np.clip(b - sp, 0, 255).astype(np.uint8)
     del rgb, alpha
     return image
+
+
+def _alpha_rows(image: pygame.Surface):
+    """First and last rows with any solid pixels."""
+    rows = np.nonzero((pygame.surfarray.array_alpha(image) > 64).any(axis=0))[0]
+    return int(rows[0]), int(rows[-1])
+
+
+def _voice_envelope(path: str):
+    """Loudness of a voice clip every DALEK_LAMP_ENV_MS, 0..1 and gated, so
+    the dome lights pulse with the syllables. None if it cannot be read."""
+    import wave
+    try:
+        with wave.open(path, "rb") as w:
+            rate, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            raw = w.readframes(w.getnframes())
+    except Exception:
+        return None
+    if sw != 2:
+        return None
+    a = np.frombuffer(raw, np.int16).astype(np.float32).reshape(-1, ch).mean(1) / 32768.0
+    hop = max(1, int(rate * DALEK_LAMP_ENV_MS / 1000))
+    n = len(a) // hop
+    if n == 0:
+        return None
+    rms = np.sqrt((a[:n * hop].reshape(n, hop) ** 2).mean(1))
+    peak = np.percentile(rms, 95) or 1.0
+    env = np.clip((rms / peak - 0.18) / 0.45, 0.0, 1.0)
+    # quick on, short release: the light holds a moment between syllables
+    out = np.empty_like(env)
+    v = 0.0
+    for i, e in enumerate(env):
+        v = e if e > v else v * 0.6
+        out[i] = v
+    return out
 
 
 def _base_anchor(image: pygame.Surface):
@@ -1413,6 +1458,12 @@ class Dalek:
         self.hum_dist = 99.0  # effective distance used for the hum (cells)
         self.hum_lr = (0.0, 0.0)  # (left, right) volume it wants
         self.hum_vol = 0.0
+        self.speak_name = None   # the voice it is saying (dome lights follow it)
+        self.speak_t0 = 0.0
+
+    def speak(self, name: str, now: float):
+        self.speak_name = name
+        self.speak_t0 = now
 
     def cell(self):
         return int(round(self.pos[0])), int(round(self.pos[1]))
@@ -1592,24 +1643,7 @@ class Game:
         self.walk_seen = -1e9
         self.character = character if character in self.char_sets else "archie"
         self._apply_character(self.character)
-        self.dalek_sprites = {}
-        self.dalek_anchor = {}
-        self.dalek_gun = {}
-        self.dalek_eye = {}
-        for key in ("se", "ne"):
-            mirror = {"se": "sw", "ne": "nw"}[key]
-            src, image, k = _load_scaled(DALEK_FILES[key], DALEK_H)
-            sw = src.get_width()
-            flipped = _finish_rgba(pygame.transform.flip(image, True, False))
-            for name, img, flip in ((key, image, False), (mirror, flipped, True)):
-                self.dalek_sprites[name] = img
-                self.dalek_anchor[name] = _base_anchor(img)
-                gx, gy = DALEK_GUN_SRC[key]
-                ex, ey = DALEK_EYE_SRC[key]
-                if flip:
-                    gx, ex = sw - 1 - gx, sw - 1 - ex
-                self.dalek_gun[name] = ((gx + 0.5) * k, (gy + 0.5) * k)
-                self.dalek_eye[name] = ((ex + 0.5) * k, (ey + 0.5) * k)
+        self._load_daleks()
         _src, self.tardis, tk = _load_scaled(TARDIS_FILE, TARDIS_H)
         self.tardis_k = tk
         self.tardis_anchor = _base_anchor(self.tardis)
@@ -2080,7 +2114,7 @@ class Game:
             d.aim_t0 = now
             d.fire_at = now + DALEK_TELEGRAPH_MS + (DALEK_TURN_MS if turned else 0)
             d.victim = victim
-            self._shout(now, victim)
+            self._shout(now, victim, d)
             return False
         d.target = n
         if turned:
@@ -2112,7 +2146,7 @@ class Game:
                 d.aim_t0 = now
                 d.fire_at = now + DALEK_TELEGRAPH_MS
                 d.victim = who
-                self._shout(now, who)
+                self._shout(now, who, d)
                 continue
             if now < d.wait_until:
                 continue
@@ -2134,7 +2168,7 @@ class Game:
                         d.pos[1] += math.copysign(move, dy)
                     break
 
-    def _shout(self, now: float, victim: str = "me"):
+    def _shout(self, now: float, victim: str = "me", d: Dalek | None = None):
         """'Exterminate!' as the telegraph starts; one voice at a time.
 
         Each shout that is actually voiced is worth SCORE_PER_SPOT. It is only
@@ -2142,13 +2176,15 @@ class Game:
         two Daleks spotting together (or one re-spotting while it is still
         shouting) is one shout and one bonus."""
         if victim == "other":
-            self._net_spotted_other(now)
+            self._net_spotted_other(now, d)
             return
         if now < self.voice_until:
             return
         self._stop_taunt()  # the real warning always wins over a callout
         self.voice_until = now + self.sfx.length_ms("exterminate", 1600.0)
         self.sfx.play("exterminate")
+        if d is not None:
+            d.speak("exterminate", now)
         if self.mode == "play" and not (self.dead or self.won):
             self.spot_bonus += SCORE_PER_SPOT
             self.bonus_pop_t0 = now
@@ -2511,6 +2547,27 @@ class Game:
             return
         self.wish = action
         self.try_action(action, now)
+
+    def level_keys(self, keys, now: float):
+        """Y+U+digit together in play: jump straight to that level (0 = 10).
+        Once per press; a single-player secret (off in network games)."""
+        held = (self.mode == "play" and self.net is None and self.card_t0 is None
+                and not self.wants_text() and all(keys[k] for k in LEVEL_KEYS))
+        digit = next((lv for k, lv in LEVEL_DIGITS.items() if keys[k]), None) if held else None
+        if digit is None:
+            self.lv_fired = False
+            return
+        if getattr(self, "lv_fired", False) or now - getattr(self, "lv_last", -1e9) < LEVEL_DEBOUNCE_MS:
+            return
+        self.lv_fired = True
+        self.lv_last = now
+        self.jump_to_level(digit)
+
+    def jump_to_level(self, level: int):
+        """A fresh maze for `level`: its Dalek count and design, Archie in
+        front of the TARDIS. The level bonus is not paid for skipped levels."""
+        self.level = max(1, int(level))
+        self.reset(time.time_ns() & 0x7FFFFFFF, banner=True)
 
     def secret_keys(self, keys, now: float):
         """I+M held together for over SECRET_HOLD_MS: fill the maze with Daleks.
@@ -2975,6 +3032,7 @@ class Game:
         self.taunt_dalek = nearest
         self.taunt_name = name
         self.taunt_until = now + self.sfx.length_ms(name, 1800.0)
+        nearest.speak(name, now)
 
     def _update_archie(self, now: float):
         if self.turning:
@@ -3358,6 +3416,58 @@ class Game:
         self.walk_seen = now
         return self.walk_phase
 
+    def _load_daleks(self):
+        """Every design's sprites at DALEK_H for the Original (the 2010 one
+        is taller), plus pre-faded lit-lamp overlays and the speech envelopes."""
+        with open(os.path.join(DALEK_DIR, "daleks.json")) as fh:
+            meta = json.load(fh)
+        self.dalek_designs = meta["order"]
+        self.dalek_sprites, self.dalek_lamps = {}, {}
+        self.dalek_anchor, self.dalek_gun, self.dalek_eye = {}, {}, {}
+        for di, name in enumerate(self.dalek_designs):
+            info_d = meta["designs"][name]
+            ref = pygame.image.load(os.path.join(DALEK_DIR, f"{name}_se.png"))
+            top, bottom = _alpha_rows(ref)
+            k = DALEK_H * info_d["height"] / (bottom - top + 1)  # the Original is DALEK_H tall
+            for key in ("se", "ne"):
+                info = info_d[key]
+                src = _despill(pygame.image.load(os.path.join(DALEK_DIR, f"{name}_{key}.png")).convert_alpha())
+                lit = pygame.image.load(os.path.join(DALEK_DIR, f"{name}_{key}_lit.png")).convert_alpha()
+                size = (max(1, round(src.get_width() * k)), max(1, round(src.get_height() * k)))
+                img = _finish_rgba(pygame.transform.smoothscale(src, size))
+                lamp = _finish_rgba(pygame.transform.smoothscale(lit, size))
+                w = size[0]
+                mirror = {"se": "sw", "ne": "nw"}[key]
+                for face, flip in ((key, False), (mirror, True)):
+                    def pt(p, flip=flip):
+                        x, y = p[0] * k, p[1] * k
+                        return (w - x if flip else x), y
+                    im = _finish_rgba(pygame.transform.flip(img, True, False)) if flip else img
+                    la = _finish_rgba(pygame.transform.flip(lamp, True, False)) if flip else lamp
+                    self.dalek_sprites[di, face] = im
+                    self.dalek_lamps[di, face] = [_alpha_scaled(la, (i + 1) / DALEK_LAMP_LEVELS)
+                                                  for i in range(DALEK_LAMP_LEVELS)]
+                    self.dalek_anchor[di, face] = _base_anchor(im)
+                    self.dalek_gun[di, face] = pt(info["gun"])
+                    self.dalek_eye[di, face] = pt(info["eye"])
+        self.voice_env = {n: _voice_envelope(os.path.join(HERE, "assets", "sounds", f"{n}.wav"))
+                          for n in ("exterminate",) + tuple(TAUNT_SOUNDS)}
+
+    def dalek_design(self, level: int | None = None) -> int:
+        """Level 1 Original, 2 Movie, 3 2005, 4 2010, then round again."""
+        return (max(1, self.level if level is None else level) - 1) % len(self.dalek_designs)
+
+    def lamp_level(self, d: Dalek, now: float) -> float:
+        """0..1 dome-light brightness: the loudness of what it is saying now."""
+        env = self.voice_env.get(d.speak_name) if d.speak_name else None
+        if env is None:
+            return 0.0
+        i = int((now - d.speak_t0) / DALEK_LAMP_ENV_MS)
+        if i < 0 or i >= len(env):
+            d.speak_name = None
+            return 0.0
+        return float(env[i])
+
     def _draw_dalek(self, screen, d: Dalek, now: float, cam_x: float, cam_y: float):
         fx, fy = tile_origin(d.pos[0], d.pos[1])
         fx = int(round(fx - cam_x))
@@ -3365,16 +3475,21 @@ class Game:
         d.feet = (fx, fy)
         if fx < -WL(80) or fx > self.view_w + WL(80) or fy < -WL(20) or fy > self.view_h + DALEK_H + WL(20):
             return
-        key = d.sprite_key(now)
+        key = (self.dalek_design(), d.sprite_key(now))
         img = self.dalek_sprites[key]
         ax, ay = self.dalek_anchor[key]
         sh = self.dalek_shadow
         screen.blit(sh, (fx - sh.get_width() // 2, fy - sh.get_height() // 2 + WL(1)))
-        screen.blit(img, (int(round(fx - ax)), int(round(fy - ay))))
+        pos = (int(round(fx - ax)), int(round(fy - ay)))
+        screen.blit(img, pos)
+        glow = self.lamp_level(d, now)
+        if glow > 0.04:
+            lamps = self.dalek_lamps[key]
+            screen.blit(lamps[min(len(lamps) - 1, int(glow * len(lamps)))], pos)
 
     def _dalek_point(self, d: Dalek, now: float, table):
         """A point on a Dalek sprite (gun or eye) in view coordinates."""
-        key = d.sprite_key(now)
+        key = (self.dalek_design(), d.sprite_key(now))
         ax, ay = self.dalek_anchor[key]
         px, py = table[key]
         return d.feet[0] - ax + px, d.feet[1] - ay + py
@@ -3779,6 +3894,10 @@ class Game:
         sub = self.font_small.render(f"{daleks_for_level(level)} Daleks", True, (232, 214, 170))
         if text_fade > 0.02:
             screen.blit(_alpha_scaled(sub, text_fade), ((self.view_w - sub.get_width()) // 2, self.view_h // 2 + 4 * PX))
+            # The next level's Dalek design, under the count.
+            dk = self.dalek_sprites[self.dalek_design(level), "se"]
+            screen.blit(_alpha_scaled(dk, text_fade), ((self.view_w - dk.get_width()) // 2,
+                                                       self.view_h // 2 + 20 * PX))
 
     def _draw_panel(self, screen, title_text: str, sub_text: str, title_colour, foot: str | None = None,
                     extra: list[str] | None = None, pop: tuple[str, float] | None = None,
@@ -4168,6 +4287,12 @@ class Game:
             if now >= self.voice_until:
                 self.voice_until = now + self.sfx.length_ms("exterminate", 1600.0)
                 self.sfx.play("exterminate")
+                # The host only says "a Dalek spotted you": light up the one
+                # aiming that is nearest.
+                aiming = [x for x in self.daleks if x.state == "aim"] or self.daleks
+                if aiming:
+                    me = (self.col, self.row)
+                    min(aiming, key=lambda x: abs(x.pos[0] - me[0]) + abs(x.pos[1] - me[1])).speak("exterminate", now)
             if not (self.dead or self.won):
                 self.spot_bonus += SCORE_PER_SPOT
                 self.bonus_pop_t0 = now
@@ -4201,7 +4326,7 @@ class Game:
             self.net_over = True
 
     # Rules (host) -------------------------------------------------------------
-    def _net_spotted_other(self, now: float):
+    def _net_spotted_other(self, now: float, d: Dalek | None = None):
         """A host Dalek shouted at the joiner: their +20, one voice at a time."""
         if now < self.other_voice_until:
             return
@@ -4211,6 +4336,8 @@ class Game:
             self._stop_taunt()
             self.voice_until = self.other_voice_until
             self.sfx.play("exterminate")
+            if d is not None:
+                d.speak("exterminate", now)
 
     def _net_kill_other(self, now: float, shooter: Dalek):
         o = self.other
@@ -4611,6 +4738,7 @@ def main(argv=None):
                 break
             keys = pygame.key.get_pressed()
             game.secret_keys(keys, now)
+            game.level_keys(keys, now)
             game.hold_action(keys, now)
             game.update(now)
             game.draw(screen, now)
