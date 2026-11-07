@@ -348,7 +348,7 @@ KEYBOARD_TITLE_HINTS = (
 PAD_TITLE_HINTS = (
     "Left stick or D-pad: choose character",
     "A: start    Y: two players on a network",
-    "In game: stick or D-pad moves, X or Y cloak, Start pauses",
+    "In game: stick or D-pad moves, A or RT forward, X or Y cloak, Start pauses",
 )
 PAD_PLAY_HINT = "Left stick or D-pad: move    X or Y: cloak    Start: pause"
 KEY_NAME_FOOT = "Enter to submit    Esc to skip"
@@ -1878,6 +1878,9 @@ class Gamepads:
         self._prev_dirs = dict(self.dirs)
         self._x_neg = self._x_pos = False
         self._y_neg = self._y_pos = False
+        self.forward = False        # A held or right trigger pulled
+        self.forward_pressed = False
+        self._rt_on = False
         self._back_since = None
         self.quit_requested = False
         self.dir_t0 = {}
@@ -1937,7 +1940,8 @@ class Gamepads:
                 self.latched_buttons.setdefault(iid, set()).discard(int(button))
         elif t == pygame.CONTROLLERAXISMOTION:
             axis = getattr(event, "axis", None)
-            if axis in (pygame.CONTROLLER_AXIS_LEFTX, pygame.CONTROLLER_AXIS_LEFTY):
+            if axis in (pygame.CONTROLLER_AXIS_LEFTX, pygame.CONTROLLER_AXIS_LEFTY,
+                        pygame.CONTROLLER_AXIS_TRIGGERRIGHT):
                 iid = getattr(event, "instance_id", 0)
                 self.latched_axes.setdefault(iid, {})[int(axis)] = getattr(event, "value", 0)
 
@@ -1967,6 +1971,20 @@ class Gamepads:
         x = max(xs, key=abs) if xs else 0.0
         y = max(ys, key=abs) if ys else 0.0
         return x, y
+
+    def _right_trigger(self) -> float:
+        """Strongest right trigger, 0..1 (SDL gives raw 0..32767)."""
+        vals = []
+        open_ids = set(self.controllers)
+        for iid, pad in list(self.controllers.items()):
+            try:
+                vals.append(_axis_unit(pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERRIGHT)))
+            except pygame.error:
+                pass
+        for iid, axes in self.latched_axes.items():
+            if iid not in open_ids:
+                vals.append(_axis_unit(axes.get(pygame.CONTROLLER_AXIS_TRIGGERRIGHT, 0)))
+        return max(vals) if vals else 0.0
 
     def _gather_held(self) -> set:
         held = set()
@@ -2024,6 +2042,11 @@ class Gamepads:
                 self.repeat_step[name] = -1
         self._prev_dirs = dirs
         self.dirs = dirs
+        rt = self._right_trigger()
+        self._rt_on = rt > PAD_RELEASE if self._rt_on else rt > PAD_DEADZONE
+        forward = pygame.CONTROLLER_BUTTON_A in self.held or self._rt_on
+        self.forward_pressed = forward and not self.forward
+        self.forward = forward
         back = pygame.CONTROLLER_BUTTON_BACK
         if back in self.held:
             if self._back_since is None:
@@ -2047,10 +2070,11 @@ class Gamepads:
             return True
         return False
 
-    def as_dirs(self):
-        """(left, right, up, down) for the tank controls, alongside the keyboard."""
+    def as_dirs(self, forward_ok: bool = False):
+        """(left, right, up, down) for the tank controls, alongside the keyboard.
+        With `forward_ok` (walking in play), A or the right trigger also goes forward."""
         d = self.dirs
-        return (d["left"], d["right"], d["up"], d["down"])
+        return (d["left"], d["right"], d["up"] or (forward_ok and self.forward), d["down"])
 
 
 def apply_pad(game, pads: "Gamepads", raw_ms: float):
@@ -2069,6 +2093,8 @@ def apply_pad(game, pads: "Gamepads", raw_ms: float):
             game.on_pad_dir(direction, now)
         elif game.entry_active and pads.dirs[direction] and pads.repeat_due(direction, now):
             game.on_pad_dir(direction, now)
+    if (pads.forward_pressed and not pads.dirs["up"] and game.pad_forward_ok()):
+        game.on_pad_dir("up", now)     # A or RT: a step forward, like the stick
     for button in pads.pressed:
         if button == start and game.mode == "play":
             continue
@@ -3104,6 +3130,11 @@ class Game:
         key = {"left": pygame.K_LEFT, "right": pygame.K_RIGHT,
                "up": pygame.K_UP, "down": pygame.K_DOWN}[direction]
         self.on_key(key, now)
+
+    def pad_forward_ok(self) -> bool:
+        """A and the right trigger walk forward only while walking: never in menus."""
+        return (self.mode == "play" and not self.paused and not self.dead
+                and not self.entry_active and self.card_t0 is None)
 
     def on_pad_button(self, button: int, now: float):
         """A/Cross confirms, B/Circle goes back, X/Y are the other actions."""
@@ -5405,7 +5436,7 @@ def main(argv=None):
             if not game.paused:
                 game.secret_keys(keys, now)
                 game.level_keys(keys, now)
-                game.hold_action(keys, now, pads.as_dirs())
+                game.hold_action(keys, now, pads.as_dirs(game.pad_forward_ok()))
             if not game.paused or game.net is not None:
                 game.update(now)
             if display.fullscreen:

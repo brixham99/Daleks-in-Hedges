@@ -175,6 +175,25 @@ check("name wheel repeats after the delay", held.repeat_due("up", G.PAD_REPEAT_D
 check("name wheel repeats on its interval", not held.repeat_due("up", G.PAD_REPEAT_DELAY + 40)
       and held.repeat_due("up", G.PAD_REPEAT_DELAY + G.PAD_REPEAT_EVERY))
 
+# A or the right trigger walks forward, but only when walking is allowed.
+fw = G.Gamepads()
+button_event(fw, pygame.CONTROLLER_BUTTON_A, True)
+fw.poll(0, 0)
+check("A held counts as forward", fw.forward and fw.forward_pressed)
+check("A is forward only while walking", fw.as_dirs(True)[2] and not fw.as_dirs(False)[2])
+button_event(fw, pygame.CONTROLLER_BUTTON_A, False)
+fw.poll(16, 16)
+check("A released stops forward", not fw.forward and not fw.as_dirs(True)[2])
+axis_event(fw, pygame.CONTROLLER_AXIS_TRIGGERRIGHT, 1)
+fw.poll(32, 32)
+check("resting right trigger is not forward", not fw.forward)
+axis_event(fw, pygame.CONTROLLER_AXIS_TRIGGERRIGHT, 32767)
+fw.poll(48, 48)
+check("right trigger pulled is forward", fw.forward and fw.as_dirs(True)[2])
+axis_event(fw, pygame.CONTROLLER_AXIS_TRIGGERRIGHT, 0)
+fw.poll(64, 64)
+check("right trigger let go stops forward", not fw.forward)
+
 # A fresh pad for the quit return value, then the game.
 pads = G.Gamepads()
 button_event(pads, pygame.CONTROLLER_BUTTON_BACK, True)
