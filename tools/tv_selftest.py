@@ -190,6 +190,8 @@ check("keyboard hint text", G.KEYBOARD_TITLE_HINTS == (
 for line in G.PAD_TITLE_HINTS:
     width = game.font_title_help.size(line)[0]
     check(f"title hint fits ({line[:28]})", width < G.WIN_W - 16, str(width))
+check("resting raw 1 is not a tilt", abs(G._axis_unit(1)) < 0.01 and abs(G._axis_unit(-1)) < 0.01)
+check("raw full tilt is -1", G._axis_unit(-32768) == -1.0)
 check("play hint fits", game.font_hud.size(G.PAD_PLAY_HINT)[0] < G.WIN_W - 200)
 check("name hint fits", game.font_small.size(G.PAD_NAME_FOOT)[0] < G.WIN_W - 80)
 

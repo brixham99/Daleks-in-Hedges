@@ -1843,9 +1843,15 @@ def _axis_unit(value) -> float:
     """A controller axis as -1..1. SDL reports -32768..32767; some events are already floats."""
     if value is None:
         return 0.0
-    v = float(value)
-    if abs(v) > 2.0:
-        v /= 32767.0
+    # Controller.get_axis and CONTROLLERAXISMOTION give raw ints (-32768..32767),
+    # so a resting stick that reads 1 or -1 is nothing, not a full tilt.
+    # Joystick-style floats are already -1..1.
+    if isinstance(value, int) and not isinstance(value, bool):
+        v = value / 32767.0
+    else:
+        v = float(value)
+        if abs(v) > 1.5:
+            v /= 32767.0
     if v < -1.0:
         return -1.0
     if v > 1.0:
@@ -3737,8 +3743,6 @@ class Game:
                     )
             self._draw_banners(view, now)
             self._draw_card(view, now)
-            if self._pad_hint_on():
-                self._draw_pad_hint(view)
             if self.paused:
                 self._draw_pause(view)
         self.frame = present_frame(window, view, self.frame, ZOOM_SMOOTH)
