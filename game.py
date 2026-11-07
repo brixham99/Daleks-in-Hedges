@@ -1710,7 +1710,7 @@ def present_frame(window: pygame.Surface, view: pygame.Surface, frame, smooth: b
             pygame.transform.smoothscale(view, win, frame)
         else:
             pygame.transform.scale(view, win, frame)
-        window.blit(frame, (0, 0))
+        _safe_blit(window, frame, (0, 0))
         return frame
     dest = fit_rect((vw, vh), win)
     if (dest.w, dest.h) != win:
@@ -1723,8 +1723,19 @@ def present_frame(window: pygame.Surface, view: pygame.Surface, frame, smooth: b
         pygame.transform.smoothscale(view, dest.size, frame)
     else:
         pygame.transform.scale(view, dest.size, frame)
-    window.blit(frame, dest.topleft)
+    _safe_blit(window, frame, dest.topleft)
     return frame
+
+
+def _safe_blit(window: pygame.Surface, frame: pygame.Surface, pos) -> None:
+    """Blit, freeing any stray pixel locks first if pygame refuses."""
+    try:
+        window.blit(frame, pos)
+    except pygame.error:
+        for surf in (window, frame):
+            while surf.get_locked():
+                surf.unlock()
+        window.blit(frame, pos)
 
 
 def zenstation_on() -> bool:
@@ -1789,16 +1800,15 @@ def open_fullscreen() -> pygame.Surface:
     if simulated:
         screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
     else:
+        # Let SDL scale the 1280x720 view to the television on the GPU, keeping
+        # the aspect ratio (black bars if needed). This is the same mode Moon
+        # Sweeper uses on the Pi; a native-size fullscreen surface there can be
+        # one pygame 2.6 will not blit onto ("Surfaces must not be locked").
         try:
-            screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.NOFRAME)
+            screen = pygame.display.set_mode(
+                (WIN_W, WIN_H), pygame.FULLSCREEN | pygame.SCALED | pygame.NOFRAME)
         except pygame.error:
-            screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
-        # Some Wayland compositors hand back a surface that is not the output.
-        if screen.get_size() != (w, h):
-            try:
-                screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
-            except pygame.error:
-                pass
+            screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.NOFRAME)
     try:
         pygame.display.set_window_position((0, 0))
     except (pygame.error, AttributeError):

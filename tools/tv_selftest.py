@@ -110,7 +110,7 @@ check("letterbox centre is the view", window.get_at((512, 384))[:3] == (10, 200,
 os.environ.pop("ZENSTATION_DISPLAY", None)
 screen = G.open_fullscreen()
 desk = pygame.display.get_desktop_sizes()[0]
-check("fullscreen uses the desktop mode", screen.get_size() == desk, str(screen.get_size()))
+check("fullscreen is GPU-scaled 1280x720 (fills the desktop)", screen.get_size() == (G.WIN_W, G.WIN_H), str(screen.get_size()))
 check("fullscreen flag is set", bool(pygame.display.is_fullscreen()))
 check("pointer hidden on the television", pygame.mouse.get_visible() is False)
 
@@ -126,7 +126,7 @@ mode = G.ScreenMode(False)
 check("windowed surface is 1280x720", mode.screen.get_size() == (G.WIN_W, G.WIN_H))
 check("pointer returns in a window", pygame.mouse.get_visible() is True)
 mode.apply(True)
-check("toggle to television fills the desktop", mode.screen.get_size() == desk and mode.fullscreen)
+check("toggle to television is scaled full screen", mode.screen.get_size() == (G.WIN_W, G.WIN_H) and mode.fullscreen)
 check("pointer hidden again", pygame.mouse.get_visible() is False)
 mode.apply(False)
 check("toggle back to the window", mode.screen.get_size() == (G.WIN_W, G.WIN_H) and not mode.fullscreen)
