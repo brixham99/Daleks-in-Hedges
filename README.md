@@ -46,21 +46,27 @@ Some Wi-Fi networks (guest, school or office networks) block broadcasts, so the 
 
 ## Controls
 
-The game runs at 1280×720 in a window that you can resize; press **F** for full screen, or start full screen with `python3 game.py --fullscreen`.
+The game is drawn at 1280×720. In a window, pygame scales that if you resize it. Press **F** for full screen, or start full screen with `python3 game.py --fullscreen`.
 
+On a television (`ZENSTATION=1`, as on the Zen Station Pi), or with `--fullscreen`, the picture fills the set at its current resolution (1080p or 4K). The 1280×720 view is scaled to fit, with black bars if the screen is not 16:9. There is no window border, and the mouse pointer is hidden. **F** still switches between that and the window.
 
-| Key | Action |
-| --- | --- |
-| Left / Right or A / D | Turn |
-| Up / W | Step forward |
-| Down / S | Step back |
-| H or Shift | Chameleon Cloak (press again to stop early) |
-| F | Full screen on / off (not while typing a name) |
-| Esc | Quit |
-| Title screen: Left / Right, A / D or 1 / 2 | Choose a character |
-| Title screen: Enter or Space | Start |
-| Title screen: N | Two players on a local network |
-| After extermination: Enter, Space or R | Back to the title screen |
+An Xbox pad (wired) or a PlayStation pad (wired or Bluetooth) works on every screen. Hints switch to the pad while one is connected, and back to the keyboard when it is unplugged. The keyboard itself is unchanged.
+
+| Key | Pad | Action |
+| --- | --- | --- |
+| Left / Right or A / D | Left stick or D-pad left / right | Turn |
+| Up / W | Left stick or D-pad up | Step forward |
+| Down / S | Left stick or D-pad down | Step back |
+| H or Shift | X or Y (Square or Triangle) | Chameleon Cloak (press again to stop early) |
+| F |  | Full screen on / off (not while typing a name) |
+| Esc | Hold Back / Share for a second | Quit, back to the launcher |
+|  | Start / Options | Pause (Start again to carry on) |
+| Title: Left / Right, A / D or 1 / 2 | Left stick or D-pad left / right | Choose Archie or Holly |
+| Title: Enter or Space | A / Cross (or Start) | Start |
+| Title: N | Y / Triangle | Two players on a local network |
+| After extermination: Enter, Space or R | A / Cross | Back to the title screen |
+
+In the lobby, **A** confirms and **B** / Circle goes back. **X** searches again while looking for games. On the high-score screen a pad edits the name on its own: up and down change the letter, left and right move along it, **A** submits, **B** deletes (or skips if the name is empty).
 
 ## Scoring
 
@@ -94,6 +100,8 @@ Note: the free [dreamlo](http://dreamlo.com) tier keeps the private code in the 
 | `--scene NAME` | Set up a test scene, then screenshot |
 | `--scene-ms N` | How far into the scene (ms) to take the shot |
 | `--demo-scores` | Fill the Top 10 with sample names (never sent) |
+| `--fullscreen` | Fill the display at its current resolution (F toggles). `ZENSTATION=1` does the same |
+| `ZENSTATION_DISPLAY=WxH` | Pretend the television is this size (headless checks use `1920x1080` and `3840x2160`) |
 | `--host` | Host a network game straight away (as `--character`) |
 | `--join HOST[:PORT]` | Join the network game at that address, skipping discovery |
 | `--net-port N` | UDP game port to host on or join (default 47475) |
@@ -113,7 +121,10 @@ The networking lives in `net.py` (standard library only). `tools/net_selftest.py
 
 ```bash
 SDL_VIDEODRIVER=dummy python3 tools/net_selftest.py
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy python3 tools/tv_selftest.py
 ```
+
+`tools/tv_selftest.py` checks the gamepad (including a synthetic pad and a hot-plugged virtual one), pause, the name wheel, and full-screen fitting at 1920×1080 and 3840×2160.
 
 Two separate copies on one machine also work: `python3 game.py --host --net-port 47480` in one terminal and `python3 game.py --join 127.0.0.1:47480` in another. Add `--frames N` with `SDL_VIDEODRIVER=dummy` for a headless run that prints a summary.
 
