@@ -2,10 +2,12 @@
 """Daleks in Hedges — a small isometric hedge-maze game in pygame.
 
 Play:  python3 game.py
+TV:    ZENSTATION=1 python3 game.py
 Test:  SDL_VIDEODRIVER=dummy python3 game.py --seed 1 --screenshot preview.png --frames 8
 
-Left and right turn Archie. Up steps forward, down steps back.
-The maze stays put; the camera scrolls so he stays centred.
+Left and right turn. Up steps forward, down steps back.
+A gamepad's left stick and D-pad do the same. The keyboard is unchanged.
+The maze stays put; the camera scrolls so the player stays centred.
 """
 
 from __future__ import annotations
@@ -57,9 +59,11 @@ TURN_MS = 220
 BUMP_MS = 110
 WIN_W = 1280
 WIN_H = 720
-# World, effects and HUD are all drawn straight at the window's 1280x720
-# (pygame.SCALED fits that to the window or full screen). ZOOM stays for
-# experiments: above 1 the view is drawn smaller and scaled up.
+# The world is always drawn at this internal size. A desktop window is that
+# size (pygame.SCALED lets the desktop resize it). On a television
+# (ZENSTATION=1 or --fullscreen) the window is the display's own resolution
+# and present_frame scales this view into it, keeping the aspect.
+# ZOOM stays for experiments: above 1 the view is drawn smaller and scaled up.
 ZOOM = 1.0
 ZOOM_SMOOTH = False  # True: smoothscale; False: nearest-neighbour scale
 MAZE_SIZE = 41  # odd, so a perfect maze has a solid border
@@ -325,6 +329,41 @@ KEY_ACTIONS = {
     pygame.K_DOWN: ("step", -1),
     pygame.K_s: ("step", -1),
 }
+
+# SDL GameController layout. Xbox and PlayStation (wired or Bluetooth) share
+# these ids: A/Cross, B/Circle, X/Square, Y/Triangle, Back/Share, Start/Options.
+PAD_DEADZONE = 0.30          # stick must move this far (about) before it counts
+PAD_RELEASE = 0.22           # a little under the deadzone, so it does not flicker
+PAD_QUIT_MS = 1000           # hold Back/Share this long to return to the launcher
+PAD_REPEAT_DELAY = 380       # name entry: wait before a held direction repeats
+PAD_REPEAT_EVERY = 130
+PAD_GLYPHS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"  # high-score wheel
+
+# Title-screen lines. The keyboard ones are the long-standing wording.
+KEYBOARD_TITLE_HINTS = (
+    "Left/Right or A/D (or 1/2): choose character",
+    "Enter / Space: start    N: Two players on a network",
+    "In game: Left/Right turn, Up/Down step, H Chameleon Cloak",
+)
+PAD_TITLE_HINTS = (
+    "Left stick or D-pad: choose character",
+    "A: start    Y: two players on a network",
+    "In game: stick or D-pad moves, X or Y cloak, Start pauses",
+)
+PAD_PLAY_HINT = "Left stick or D-pad: move    X or Y: cloak    Start: pause"
+KEY_NAME_FOOT = "Enter to submit    Esc to skip"
+PAD_NAME_PROMPT = "Up or down: letter    Left or right: move"
+PAD_NAME_FOOT = "A: submit    B: delete or skip"
+KEY_LOBBY_SUB = "Up/Down: host or join    Left/Right: Archie or Holly"
+PAD_LOBBY_SUB = "Up or down: host or join    Left or right: Archie or Holly"
+KEY_LOBBY_FOOT = "Enter to choose    Esc back"
+PAD_LOBBY_FOOT = "A to choose    B back"
+KEY_SCAN_FOOT = "Enter join    R search again    Esc back"
+PAD_SCAN_FOOT = "A join    X search again    B back"
+KEY_CANCEL_FOOT = "Esc to cancel"
+PAD_CANCEL_FOOT = "B to cancel"
+KEY_AGAIN_FOOT = "Enter to Play Again"
+PAD_AGAIN_FOOT = "A to play again"
 
 
 def daleks_for_level(level: int) -> int:
@@ -1626,6 +1665,401 @@ def _make_cloak_icon() -> pygame.Surface:
     return _finish_rgba(pygame.transform.smoothscale(surf, (W, H)))
 
 
+def _div_round(numer: int, denom: int) -> int:
+    """Integer division that rounds halves upward (not banker's rounding)."""
+    if denom <= 0:
+        return 0
+    return (numer + denom // 2) // denom
+
+
+def fit_rect(content: tuple[int, int], canvas: tuple[int, int]) -> pygame.Rect:
+    """Largest rect of `content`'s aspect that fits inside `canvas`, centred.
+
+    A 16:9 view on a 16:9 television fills the screen. A narrower or wider
+    display gets black bars (letterbox or pillarbox), never a stretched picture.
+    """
+    cw, ch = content
+    ww, wh = canvas
+    if cw <= 0 or ch <= 0 or ww <= 0 or wh <= 0:
+        return pygame.Rect(0, 0, max(1, ww), max(1, wh))
+    if cw * wh == ch * ww:
+        return pygame.Rect(0, 0, ww, wh)
+    if cw * wh > ch * ww:  # content is wider than the canvas: bars above and below
+        dw = ww
+        dh = min(wh, max(1, _div_round(ch * ww, cw)))
+    else:
+        dh = wh
+        dw = min(ww, max(1, _div_round(cw * wh, ch)))
+    return pygame.Rect((ww - dw) // 2, (wh - dh) // 2, dw, dh)
+
+
+def present_frame(window: pygame.Surface, view: pygame.Surface, frame, smooth: bool):
+    """Copy the internal view onto the window. Returns the (maybe new) buffer.
+
+    When the window is the view's own size this is the long-standing scale into
+    an opaque buffer (a 1:1 scale in the normal desktop window). On a larger
+    television it nearest-neighbour scales once into the fitted rect. Nearest
+    keeps a Pi-class CPU happy: a 720p view to 4K is one blit, not a smoothscale.
+    """
+    win = window.get_size()
+    vw, vh = view.get_size()
+    if win == (vw, vh):
+        if frame is None or frame.get_size() != win:
+            frame = pygame.Surface(win).convert()
+        if smooth:
+            pygame.transform.smoothscale(view, win, frame)
+        else:
+            pygame.transform.scale(view, win, frame)
+        window.blit(frame, (0, 0))
+        return frame
+    dest = fit_rect((vw, vh), win)
+    if (dest.w, dest.h) != win:
+        window.fill((0, 0, 0))
+    if frame is None or frame.get_size() != dest.size:
+        frame = pygame.Surface(dest.size).convert()
+    if dest.size == (vw, vh):
+        frame.blit(view, (0, 0))
+    elif smooth:
+        pygame.transform.smoothscale(view, dest.size, frame)
+    else:
+        pygame.transform.scale(view, dest.size, frame)
+    window.blit(frame, dest.topleft)
+    return frame
+
+
+def zenstation_on() -> bool:
+    """True when the launcher asked for the television layout."""
+    return os.environ.get("ZENSTATION", "").strip() == "1"
+
+
+def fullscreen_size() -> tuple[tuple[int, int], bool]:
+    """(width, height) of the TV, and whether a simulated size was asked for.
+
+    ZENSTATION_DISPLAY=1920x1080 (or 3840x2160) stands in for a set when the
+    video driver is the headless dummy, whose only mode is a small fake desktop.
+    Without it, the size is whatever SDL reports for the current display.
+    """
+    spec = os.environ.get("ZENSTATION_DISPLAY", "").strip().lower().replace(" ", "")
+    if "x" in spec:
+        w, h = spec.split("x", 1)
+        try:
+            return (max(1, int(w)), max(1, int(h))), True
+        except ValueError:
+            pass
+    try:
+        sizes = pygame.display.get_desktop_sizes() or []
+    except pygame.error:
+        sizes = []
+    if sizes and sizes[0][0] > 1 and sizes[0][1] > 1:
+        return (int(sizes[0][0]), int(sizes[0][1])), False
+    try:
+        info = pygame.display.Info()
+        if info.current_w > 1 and info.current_h > 1:
+            return (int(info.current_w), int(info.current_h)), False
+    except pygame.error:
+        pass
+    return (WIN_W, WIN_H), False
+
+
+def _hide_mouse():
+    try:
+        pygame.mouse.set_visible(False)
+    except pygame.error:
+        pass
+
+
+def _show_mouse():
+    try:
+        pygame.mouse.set_visible(True)
+    except pygame.error:
+        pass
+
+
+def open_fullscreen() -> pygame.Surface:
+    """A borderless window that fills the display's current mode.
+
+    pygame.FULLSCREEN on SDL2 is a desktop fullscreen window: the television
+    keeps its native mode (no mode switch, no border). The dummy driver cannot
+    leave its one fake mode, so a simulated ZENSTATION_DISPLAY size is opened
+    borderless at exactly those pixels instead. Either way the game draws the
+    1280x720 view and present_frame fits it.
+    """
+    (w, h), simulated = fullscreen_size()
+    _hide_mouse()
+    if simulated:
+        screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
+    else:
+        try:
+            screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.NOFRAME)
+        except pygame.error:
+            screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
+        # Some Wayland compositors hand back a surface that is not the output.
+        if screen.get_size() != (w, h):
+            try:
+                screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
+            except pygame.error:
+                pass
+    try:
+        pygame.display.set_window_position((0, 0))
+    except pygame.error:
+        pass  # Wayland does not allow moving the window; fullscreen covers it
+    _hide_mouse()
+    return screen
+
+
+class ScreenMode:
+    """Desktop window, or the television. F toggles. Keyboard play is unchanged."""
+
+    def __init__(self, fullscreen: bool):
+        self.fullscreen = False
+        self.screen = None
+        self.apply(fullscreen)
+
+    def apply(self, fullscreen: bool) -> pygame.Surface:
+        self.fullscreen = bool(fullscreen)
+        if self.fullscreen:
+            self.screen = open_fullscreen()
+        else:
+            # The ordinary window: 1280x720, SCALED, just as before.
+            self.screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.SCALED)
+            _show_mouse()
+        return self.screen
+
+    def toggle(self) -> pygame.Surface:
+        return self.apply(not self.fullscreen)
+
+
+def _axis_unit(value) -> float:
+    """A controller axis as -1..1. SDL reports -32768..32767; some events are already floats."""
+    if value is None:
+        return 0.0
+    v = float(value)
+    if abs(v) > 2.0:
+        v /= 32767.0
+    if v < -1.0:
+        return -1.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
+class Gamepads:
+    """Connected SDL game controllers. Hot-plug is handled. Several pads merge.
+
+    State comes from the open controllers each frame. Button and axis events are
+    also latched, so a synthetic event (no real device) drives the same paths.
+    Xbox and PlayStation both arrive already mapped to the GameController buttons.
+    """
+
+    def __init__(self):
+        self.controllers = {}       # instance id -> Controller
+        self.latched_buttons = {}   # instance id -> set of buttons still down
+        self.latched_axes = {}      # instance id -> {axis: value}
+        self.held = set()
+        self.pressed = set()        # went down this poll
+        self.dirs = {"left": False, "right": False, "up": False, "down": False}
+        self.dir_pressed = {k: False for k in self.dirs}
+        self._prev_dirs = dict(self.dirs)
+        self._x_neg = self._x_pos = False
+        self._y_neg = self._y_pos = False
+        self._back_since = None
+        self.quit_requested = False
+        self.dir_t0 = {}
+        self.repeat_step = {}
+        self._api = None
+        try:
+            import pygame._sdl2.controller as api
+            api.init()
+            self._api = api
+        except (ImportError, pygame.error, AttributeError):
+            self._api = None
+        self.scan()
+
+    def _drop(self, iid):
+        self.controllers.pop(iid, None)
+        self.latched_buttons.pop(iid, None)
+        self.latched_axes.pop(iid, None)
+
+    def scan(self):
+        api = self._api
+        if api is None:
+            return
+        try:
+            n = api.get_count()
+        except pygame.error:
+            return
+        for i in range(n):
+            self._open(i)
+
+    def _open(self, index):
+        api = self._api
+        if api is None or index is None:
+            return
+        try:
+            if index < 0 or index >= api.get_count() or not api.is_controller(index):
+                return
+            pad = api.Controller(index)
+            self.controllers[pad.id] = pad
+        except (pygame.error, AttributeError, IndexError):
+            return
+
+    def handle_event(self, event) -> None:
+        t = event.type
+        if t == pygame.CONTROLLERDEVICEADDED:
+            self._open(getattr(event, "device_index", None))
+        elif t == pygame.CONTROLLERDEVICEREMOVED:
+            self._drop(getattr(event, "instance_id", None))
+        elif t == pygame.CONTROLLERBUTTONDOWN:
+            iid = getattr(event, "instance_id", 0)
+            button = getattr(event, "button", None)
+            if button is not None:
+                self.latched_buttons.setdefault(iid, set()).add(int(button))
+        elif t == pygame.CONTROLLERBUTTONUP:
+            iid = getattr(event, "instance_id", 0)
+            button = getattr(event, "button", None)
+            if button is not None:
+                self.latched_buttons.setdefault(iid, set()).discard(int(button))
+        elif t == pygame.CONTROLLERAXISMOTION:
+            axis = getattr(event, "axis", None)
+            if axis in (pygame.CONTROLLER_AXIS_LEFTX, pygame.CONTROLLER_AXIS_LEFTY):
+                iid = getattr(event, "instance_id", 0)
+                self.latched_axes.setdefault(iid, {})[int(axis)] = getattr(event, "value", 0)
+
+    def connected(self) -> bool:
+        # A latched instance with every button up still counts: the pad is there.
+        return bool(self.controllers or self.latched_buttons or self.latched_axes)
+
+    def _stick(self):
+        """Strongest left stick, as (-1..1, -1..1), plus d-pad buttons already in `held`."""
+        xs = []
+        ys = []
+        open_ids = set(self.controllers)
+        for iid, pad in list(self.controllers.items()):
+            try:
+                if not pad.attached():
+                    self._drop(iid)
+                    continue
+                xs.append(_axis_unit(pad.get_axis(pygame.CONTROLLER_AXIS_LEFTX)))
+                ys.append(_axis_unit(pad.get_axis(pygame.CONTROLLER_AXIS_LEFTY)))
+            except pygame.error:
+                self._drop(iid)
+        for iid, axes in self.latched_axes.items():
+            if iid in open_ids:
+                continue
+            xs.append(_axis_unit(axes.get(pygame.CONTROLLER_AXIS_LEFTX, 0)))
+            ys.append(_axis_unit(axes.get(pygame.CONTROLLER_AXIS_LEFTY, 0)))
+        x = max(xs, key=abs) if xs else 0.0
+        y = max(ys, key=abs) if ys else 0.0
+        return x, y
+
+    def _gather_held(self) -> set:
+        held = set()
+        interesting = (
+            pygame.CONTROLLER_BUTTON_A, pygame.CONTROLLER_BUTTON_B,
+            pygame.CONTROLLER_BUTTON_X, pygame.CONTROLLER_BUTTON_Y,
+            pygame.CONTROLLER_BUTTON_BACK, pygame.CONTROLLER_BUTTON_START,
+            pygame.CONTROLLER_BUTTON_DPAD_UP, pygame.CONTROLLER_BUTTON_DPAD_DOWN,
+            pygame.CONTROLLER_BUTTON_DPAD_LEFT, pygame.CONTROLLER_BUTTON_DPAD_RIGHT,
+        )
+        open_ids = set(self.controllers)
+        for iid, pad in list(self.controllers.items()):
+            try:
+                if not pad.attached():
+                    self._drop(iid)
+                    continue
+                for b in interesting:
+                    if pad.get_button(b):
+                        held.add(b)
+            except pygame.error:
+                self._drop(iid)
+        for iid, buttons in self.latched_buttons.items():
+            if iid in open_ids:
+                continue
+            held |= set(buttons)
+        return held
+
+    @staticmethod
+    def _hyst(value: float, was_neg: bool, was_pos: bool):
+        neg = value < -PAD_RELEASE if was_neg else value < -PAD_DEADZONE
+        pos = value > PAD_RELEASE if was_pos else value > PAD_DEADZONE
+        return neg, pos
+
+    def poll(self, raw_ms: float, repeat_now: float) -> None:
+        """Read every pad. `raw_ms` is wall time (the quit hold). `repeat_now` is game time."""
+        self.held = self._gather_held()
+        self.pressed = self.held - getattr(self, "_prev_held", set())
+        self._prev_held = set(self.held)
+        x, y = self._stick()
+        self._x_neg, self._x_pos = self._hyst(x, self._x_neg, self._x_pos)
+        self._y_neg, self._y_pos = self._hyst(y, self._y_neg, self._y_pos)
+        dirs = {
+            "left": self._x_neg or pygame.CONTROLLER_BUTTON_DPAD_LEFT in self.held,
+            "right": self._x_pos or pygame.CONTROLLER_BUTTON_DPAD_RIGHT in self.held,
+            "up": self._y_neg or pygame.CONTROLLER_BUTTON_DPAD_UP in self.held,
+            "down": self._y_pos or pygame.CONTROLLER_BUTTON_DPAD_DOWN in self.held,
+        }
+        self.dir_pressed = {k: dirs[k] and not self._prev_dirs[k] for k in dirs}
+        for name, on in dirs.items():
+            if on and not self._prev_dirs[name]:
+                self.dir_t0[name] = repeat_now
+                self.repeat_step[name] = -1
+            elif not on:
+                self.dir_t0[name] = None
+                self.repeat_step[name] = -1
+        self._prev_dirs = dirs
+        self.dirs = dirs
+        back = pygame.CONTROLLER_BUTTON_BACK
+        if back in self.held:
+            if self._back_since is None:
+                self._back_since = raw_ms
+            elif raw_ms - self._back_since >= PAD_QUIT_MS:
+                self.quit_requested = True
+        else:
+            self._back_since = None
+
+    def repeat_due(self, direction: str, now: float) -> bool:
+        """A later press of a direction that is still held, for the name wheel."""
+        t0 = self.dir_t0.get(direction)
+        if t0 is None or not self.dirs.get(direction):
+            return False
+        held_for = now - t0
+        if held_for < PAD_REPEAT_DELAY:
+            return False
+        step = int((held_for - PAD_REPEAT_DELAY) / PAD_REPEAT_EVERY)
+        if step > self.repeat_step.get(direction, -1):
+            self.repeat_step[direction] = step
+            return True
+        return False
+
+    def as_dirs(self):
+        """(left, right, up, down) for the tank controls, alongside the keyboard."""
+        d = self.dirs
+        return (d["left"], d["right"], d["up"], d["down"])
+
+
+def apply_pad(game, pads: "Gamepads", raw_ms: float):
+    """One frame of pad edges. Returns "quit" when Back/Share was held long enough."""
+    if pads.quit_requested:
+        return "quit"
+    now = game.clock_now(raw_ms)
+    start = pygame.CONTROLLER_BUTTON_START
+    if start in pads.pressed and game.mode == "play":
+        game.toggle_pause(raw_ms)
+        return None
+    if game.paused:
+        return None
+    for direction in ("left", "right", "up", "down"):
+        if pads.dir_pressed[direction]:
+            game.on_pad_dir(direction, now)
+        elif game.entry_active and pads.dirs[direction] and pads.repeat_due(direction, now):
+            game.on_pad_dir(direction, now)
+    for button in pads.pressed:
+        if button == start and game.mode == "play":
+            continue
+        game.on_pad_button(button, now)
+    return None
+
+
 class Game:
     def __init__(self, seed: int | None, level: int = 1, character: str = "archie", title: bool = True,
                  online: bool = True, net_port: int = net.GAME_PORT, discovery_port: int = net.DISCOVERY_PORT):
@@ -1744,6 +2178,10 @@ class Game:
         self.exit_hold = False       # in the TARDIS, waiting for the other player
         self.exit_release_t = -1e9
         self.pay_on_exit = True
+        self.paused = False
+        self.pause_offset = 0       # raw ticks spent paused, so game time does not jump
+        self._pause_mark = 0
+        self.using_pad = False       # British button hints follow the pad, when one is in
         self.mode = "title" if title else "play"
         self.title_pick = CHAR_ORDER.index(self.character) if self.character in CHAR_ORDER else 0
         seed0 = seed if seed is not None else (time.time_ns() & 0x7FFFFFFF)
@@ -1775,6 +2213,7 @@ class Game:
         self.entry_done = False
         self.entry_name = ""
         self.entry_note = ""
+        self.entry_cursor = 0        # pad name wheel; the keyboard always types at the end
         self.final_score = 0
 
     @property
@@ -1803,6 +2242,39 @@ class Game:
             return
         self.entry_active = True
         self.entry_name = self.board.last_name
+        self.entry_cursor = len(self.entry_name)
+
+    def clock_now(self, raw_ms: float) -> float:
+        """Game time. A paused single-player game stays on the frame it stopped."""
+        if self.paused and self.mode == "play" and self.net is None:
+            return self._pause_mark - self.pause_offset
+        return raw_ms - self.pause_offset
+
+    def _pause_mixer(self, pause: bool):
+        try:
+            if pause:
+                pygame.mixer.pause()
+            else:
+                pygame.mixer.unpause()
+        except pygame.error:
+            pass
+
+    def toggle_pause(self, raw_ms: float):
+        """Start/Options. Single player freezes. A network game only stops your moves
+        (the other player, and the Daleks, carry on) so the link does not drop."""
+        if self.mode != "play":
+            return
+        freezes = self.net is None
+        if not self.paused:
+            self.paused = True
+            self._pause_mark = raw_ms
+            if freezes:
+                self._pause_mixer(True)
+        else:
+            if freezes:
+                self.pause_offset += raw_ms - self._pause_mark
+                self._pause_mixer(False)
+            self.paused = False
 
     def _entry_status(self) -> str:
         """Death-panel line about the leaderboard once the name step is over."""
@@ -1832,9 +2304,61 @@ class Game:
             self.entry_note = ""
         elif key == pygame.K_BACKSPACE:
             self.entry_name = self.entry_name[:-1]
+            self.entry_cursor = len(self.entry_name)
         elif text and len(text) == 1 and text.isascii() and (text.isalnum() or text == " "):
             if len(self.entry_name) < NAME_MAX and not (text == " " and (not self.entry_name or self.entry_name.endswith(" "))):
                 self.entry_name += text
+                self.entry_cursor = len(self.entry_name)
+
+    def _cycle_glyph(self, ch: str, delta: int, index: int) -> str:
+        glyphs = PAD_GLYPHS
+        cur = ch.upper()
+        if cur not in glyphs:
+            cur = "A"
+        i = glyphs.index(cur)
+        for _ in range(len(glyphs)):
+            i = (i + delta) % len(glyphs)
+            nxt = glyphs[i]
+            if nxt == " " and (index == 0 or (index > 0 and self.entry_name[index - 1] == " ")):
+                continue
+            return nxt
+        return cur
+
+    def _entry_pad_dir(self, direction: str):
+        """Pad-only name: up/down cycles the letter, left/right moves along it."""
+        name = self.entry_name
+        n = len(name)
+        hi = n if n < NAME_MAX else max(0, n - 1)
+        i = max(0, min(hi, self.entry_cursor))
+        if direction == "left":
+            self.entry_cursor = max(0, i - 1)
+            return
+        if direction == "right":
+            self.entry_cursor = min(hi, i + 1)
+            return
+        delta = 1 if direction == "up" else -1
+        if i >= n:
+            if n >= NAME_MAX:
+                i = max(0, n - 1)
+            else:
+                self.entry_name = name + ("A" if delta > 0 else "9")
+                self.entry_cursor = n
+                return
+        ch = self._cycle_glyph(self.entry_name[i], delta, i)
+        self.entry_name = self.entry_name[:i] + ch + self.entry_name[i + 1:]
+        self.entry_cursor = i
+
+    def _entry_pad_back(self, now: float):
+        """B deletes the letter under the cursor, or skips when the name is empty."""
+        if not self.entry_name:
+            self._entry_key(pygame.K_ESCAPE, "", now)
+            return
+        n = len(self.entry_name)
+        i = max(0, min(self.entry_cursor, n))
+        if i >= n:
+            i = n - 1
+        self.entry_name = self.entry_name[:i] + self.entry_name[i + 1:]
+        self.entry_cursor = min(i, len(self.entry_name))
 
     def _enter_title(self, seed: int | None = None):
         """Decorative maze with TITLE_DALEKS Daleks; no player, no deaths."""
@@ -2488,16 +3012,22 @@ class Game:
             return keys[pygame.K_DOWN] or keys[pygame.K_s]
         return False
 
-    def desired_action(self, keys):
+    def desired_action(self, keys, pad_dirs=None):
+        # pad_dirs is (left, right, up, down) from the stick and D-pad, or None.
+        # With None (or all false) this is exactly the keyboard choice.
+        if pad_dirs is None:
+            pad_left = pad_right = pad_up = pad_down = False
+        else:
+            pad_left, pad_right, pad_up, pad_down = pad_dirs
         turns = []
-        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+        if keys[pygame.K_LEFT] or keys[pygame.K_a] or pad_left:
             turns.append(("turn", -1))
-        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d] or pad_right:
             turns.append(("turn", 1))
         steps = []
-        if keys[pygame.K_UP] or keys[pygame.K_w]:
+        if keys[pygame.K_UP] or keys[pygame.K_w] or pad_up:
             steps.append(("step", 1))
-        if keys[pygame.K_DOWN] or keys[pygame.K_s]:
+        if keys[pygame.K_DOWN] or keys[pygame.K_s] or pad_down:
             steps.append(("step", -1))
         # A held turn finishes before a held step. They never share a frame.
         if turns:
@@ -2547,6 +3077,55 @@ class Game:
             return
         self.wish = action
         self.try_action(action, now)
+
+    def on_pad_dir(self, direction: str, now: float):
+        """One D-pad or stick edge. In play this matches a key press; the hold repeats it."""
+        if self.paused:
+            return
+        if self.entry_active and self.mode == "play":
+            self._entry_pad_dir(direction)
+            return
+        key = {"left": pygame.K_LEFT, "right": pygame.K_RIGHT,
+               "up": pygame.K_UP, "down": pygame.K_DOWN}[direction]
+        self.on_key(key, now)
+
+    def on_pad_button(self, button: int, now: float):
+        """A/Cross confirms, B/Circle goes back, X/Y are the other actions."""
+        if self.paused:
+            return
+        A = pygame.CONTROLLER_BUTTON_A
+        B = pygame.CONTROLLER_BUTTON_B
+        X = pygame.CONTROLLER_BUTTON_X
+        Y = pygame.CONTROLLER_BUTTON_Y
+        start = pygame.CONTROLLER_BUTTON_START
+        if button in (X, Y):
+            if self.mode == "title" and button == Y:
+                self.on_key(NET_KEY, now)
+                return
+            if (self.mode == "lobby" and button == X and self.lobby
+                    and self.lobby.get("stage") == "scanning"):
+                self._lobby_key(pygame.K_r, now)
+                return
+            if self.mode == "play" and not self.entry_active and self.card_t0 is None:
+                self.toggle_disguise(now)
+            return
+        if button in (A, start):
+            if self.entry_active:
+                self._entry_key(pygame.K_RETURN, "", now)
+            elif self.mode == "lobby":
+                self._lobby_key(pygame.K_RETURN, now)
+            elif self.mode == "title":
+                self.on_key(pygame.K_RETURN, now)
+            elif self.mode == "play" and self.dead and self.entry_done:
+                self.on_key(pygame.K_RETURN, now)
+            return
+        if button == B:
+            if self.entry_active:
+                self._entry_pad_back(now)
+            elif self.mode == "lobby":
+                self._lobby_key(pygame.K_ESCAPE, now)
+            elif self.mode == "play" and self.dead and self.entry_done:
+                self.on_key(pygame.K_RETURN, now)
 
     def level_keys(self, keys, now: float):
         """Y+U+digit together in play: jump straight to that level (0 = 10).
@@ -2634,10 +3213,12 @@ class Game:
             added += 1
         return added
 
-    def hold_action(self, keys, now: float):
+    def hold_action(self, keys, now: float, pad_dirs=None):
+        if self.paused:
+            return
         if self.mode != "play" or self.busy() or self.won or self.dead or self.disguised or self.card_t0 is not None:
             return
-        action = self.desired_action(keys)
+        action = self.desired_action(keys, pad_dirs)
         if action is None:
             return
         self.wish = action
@@ -3140,17 +3721,17 @@ class Game:
                         view, "EXTERMINATED",
                         f"{who} reached level {self.level}",
                         (255, 96, 72),
-                        foot="Enter to Play Again",
+                        foot=PAD_AGAIN_FOOT if self.using_pad else KEY_AGAIN_FOOT,
                         extra=extra,
                         pop=pop,
                     )
             self._draw_banners(view, now)
             self._draw_card(view, now)
-        if ZOOM_SMOOTH:
-            pygame.transform.smoothscale(view, self.frame.get_size(), self.frame)
-        else:
-            pygame.transform.scale(view, self.frame.get_size(), self.frame)
-        window.blit(self.frame, (0, 0))
+            if self._pad_hint_on():
+                self._draw_pad_hint(view)
+            if self.paused:
+                self._draw_pause(view)
+        self.frame = present_frame(window, view, self.frame, ZOOM_SMOOTH)
 
     def _draw_world(self, screen: pygame.Surface, now: float):
         screen.fill(BG_COLOUR)
@@ -3785,8 +4366,12 @@ class Game:
         lines = [title, sub, sc]
         if self.final_score >= best and self.final_score > 0:
             lines.append(self.font_score.render("New high score!", True, (255, 220, 120)))
-        prompt = self.font_small.render(f"Enter your name (up to {NAME_MAX} letters)", True, cream)
-        foot = self.font_small.render("Enter to submit    Esc to skip", True, (200, 180, 140))
+        if self.using_pad:
+            prompt = self.font_small.render(PAD_NAME_PROMPT, True, cream)
+            foot = self.font_small.render(PAD_NAME_FOOT, True, (200, 180, 140))
+        else:
+            prompt = self.font_small.render(f"Enter your name (up to {NAME_MAX} letters)", True, cream)
+            foot = self.font_small.render(KEY_NAME_FOOT, True, (200, 180, 140))
         note = self.font_hud.render("Your country's flag is shown next to your score", True, (170, 152, 118))
         sample = self.font_entry.render("W" * NAME_MAX, True, (0, 0, 0))
         P = PX
@@ -3807,8 +4392,21 @@ class Game:
                 name = self.font_entry.render(self.entry_name, True, (255, 248, 230))
                 nx = fx + 8 * P
                 panel.blit(name, (nx, y + 4 * P))
-                if int(now / 450) % 2 == 0 and len(self.entry_name) < NAME_MAX:
-                    cx = nx + name.get_width() + P
+                show = int(now / 450) % 2 == 0
+                cursor_at = len(self.entry_name)
+                if self.using_pad:
+                    hi = len(self.entry_name) if len(self.entry_name) < NAME_MAX else max(0, len(self.entry_name) - 1)
+                    cursor_at = max(0, min(hi, self.entry_cursor))
+                if self.using_pad and cursor_at < len(self.entry_name) and show:
+                    pre = self.font_entry.size(self.entry_name[:cursor_at])[0]
+                    cw = max(2 * P, self.font_entry.size(self.entry_name[cursor_at])[0])
+                    pygame.draw.rect(panel, (255, 220, 120, 255),
+                                     (nx + pre, y + field_h - 6 * P, cw, 2 * P))
+                elif show and len(self.entry_name) < NAME_MAX:
+                    if self.using_pad:
+                        cx = nx + self.font_entry.size(self.entry_name[:cursor_at])[0] + P
+                    else:
+                        cx = nx + name.get_width() + P
                     pygame.draw.rect(panel, (255, 220, 120, 255), (cx, y + 5 * P, 2 * P, field_h - 10 * P))
                 y += field_h + gap
                 continue
@@ -4077,12 +4675,15 @@ class Game:
                 extra.append(lb["msg"])
             if lb["pick"] == 1:
                 extra[0], extra[1] = extra[1], extra[0]  # the chosen line is the bright one
-            self._draw_panel(screen, "Two Players", "Up/Down: host or join    Left/Right: Archie or Holly",
-                             (255, 220, 120), foot="Enter to choose    Esc back", extra=extra, strip_dots=False)
+            sub = PAD_LOBBY_SUB if self.using_pad else KEY_LOBBY_SUB
+            foot = PAD_LOBBY_FOOT if self.using_pad else KEY_LOBBY_FOOT
+            self._draw_panel(screen, "Two Players", sub,
+                             (255, 220, 120), foot=foot, extra=extra, strip_dots=False)
         elif stage == "hosting":
             addr = f"{net.local_ip()}  UDP {self.net.port}"
+            foot = PAD_CANCEL_FOOT if self.using_pad else KEY_CANCEL_FOOT
             self._draw_panel(screen, "Hosting", f"Waiting for a player to join{'.' * (int(now / 400) % 4)}",
-                             (255, 220, 120), foot="Esc to cancel",
+                             (255, 220, 120), foot=foot,
                              extra=[f"You are {char}, they will be {other}", addr], strip_dots=False)
         elif stage == "scanning":
             hosts = lb["hosts"]
@@ -4096,11 +4697,13 @@ class Game:
             sub = "Looking for games" + "." * (int(now / 400) % 4) if searching else f"Found {len(hosts)} game{'s' if len(hosts) != 1 else ''}"
             if not lines:
                 lines = [lb["msg"] or ("" if searching else "No games found - is the host waiting?")]
+            foot = PAD_SCAN_FOOT if self.using_pad else KEY_SCAN_FOOT
             self._draw_panel(screen, "Join a Game", sub, (255, 220, 120),
-                             foot="Enter join    R search again    Esc back", extra=[l for l in lines if l] or None, strip_dots=False)
+                             foot=foot, extra=[l for l in lines if l] or None, strip_dots=False)
         elif stage == "joining":
             ip, port = lb["addr"]
-            self._draw_panel(screen, "Joining", f"Contacting {ip} on UDP {port}", (255, 220, 120), foot="Esc to cancel", strip_dots=False)
+            foot = PAD_CANCEL_FOOT if self.using_pad else KEY_CANCEL_FOOT
+            self._draw_panel(screen, "Joining", f"Contacting {ip} on UDP {port}", (255, 220, 120), foot=foot, strip_dots=False)
 
     def _net_close(self):
         for attr in ("net", "beacon", "scanner"):
@@ -4588,12 +5191,37 @@ class Game:
                 screen.blit(mark, (bx + (bw - mark.get_width()) // 2, by - 14 * P))
             x0 += img.get_width() + pad_x * 2 + gap
 
+    def _pad_hint_on(self) -> bool:
+        """A quiet line during play, and only while a pad is connected."""
+        if not self.using_pad or self.mode != "play" or self.paused:
+            return False
+        if self.entry_active or self.card_t0 is not None:
+            return False
+        if self.dead and (self.net is None or self.net_over):
+            return False
+        return True
+
+    def _draw_pad_hint(self, screen):
+        surf = self.font_hud.render(PAD_PLAY_HINT, True, (230, 214, 180))
+        pad = 4 * PX
+        back = _new_rgba((surf.get_width() + pad * 2, surf.get_height() + pad))
+        back.fill((20, 12, 6, 140))
+        x = (self.view_w - back.get_width()) // 2
+        y = self.view_h - back.get_height() - 4 * PX
+        screen.blit(_finish_rgba(back), (x, y))
+        screen.blit(surf, (x + pad, y + pad // 2))
+
+    def _draw_pause(self, screen):
+        veil = _new_rgba((self.view_w, self.view_h))
+        veil.fill((8, 4, 2, 150))
+        screen.blit(_finish_rgba(veil), (0, 0))
+        self._banner(screen, "Paused", (255, 236, 170), 1.0, self.view_h // 2 - 28 * PX)
+        sub = "Start to continue" if self.net is None else "Start to move again"
+        t = self.font_small.render(sub, True, (232, 214, 170))
+        screen.blit(t, ((self.view_w - t.get_width()) // 2, self.view_h // 2 + 8 * PX))
+
     def _draw_title_footer(self, screen):
-        lines = [
-            "Left/Right or A/D (or 1/2): choose character",
-            "Enter / Space: start    N: Two players on a network",
-            "In game: Left/Right turn, Up/Down step, H Chameleon Cloak",
-        ]
+        lines = PAD_TITLE_HINTS if self.using_pad else KEYBOARD_TITLE_HINTS
         # Copyright at the very bottom (wrapped); controls sit just above it.
         copy_margin = 8 * PX
         copy_gap = 10 * PX  # line height for the size-8 font
@@ -4626,7 +5254,8 @@ def parse_args(argv):
     parser.add_argument("--demo-scores", action="store_true",
                         help="debug: fill the Top 10 with sample names (shown only, never sent)")
     parser.add_argument("--offline", action="store_true", help="never contact the online leaderboard")
-    parser.add_argument("--fullscreen", action="store_true", help="start full screen (F toggles)")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="fill the display (native resolution, F toggles). ZENSTATION=1 does the same")
     parser.add_argument("--host", action="store_true",
                         help="network: host a two-player game straight away (as --character)")
     parser.add_argument("--join", type=str, default=None, metavar="HOST[:PORT]",
@@ -4675,24 +5304,28 @@ def _run_net_headless(game: Game, screen, args) -> int:
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    headless = args.screenshot is not None or args.frames is not None or args.scene is not None
+    # A television opens at the top-left of the output. Set before the display
+    # starts; a later move is not allowed on Wayland (labwc).
+    if not headless and (args.fullscreen or zenstation_on()):
+        os.environ.setdefault("SDL_VIDEO_WINDOW_POS", "0,0")
     try:
         pygame.mixer.pre_init(MIXER_FREQ, -16, 2, MIXER_BUFFER)
     except Exception:
         pass
     pygame.init()
     pygame.display.set_caption("Daleks in Hedges")
-    # A 1280x720 window (pygame.SCALED: the desktop scales it, crisp on
-    # Retina); --fullscreen starts full screen, F toggles in play.
-    if args.screenshot is not None or args.frames is not None or args.scene is not None:
+    # Headless checks keep a plain 1280x720 surface (the internal view).
+    # Otherwise: a SCALED desktop window, or the TV's own resolution.
+    display = None
+    if headless:
         screen = pygame.display.set_mode((WIN_W, WIN_H))
-    elif args.fullscreen:
-        screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.FULLSCREEN | pygame.SCALED)
     else:
-        screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.SCALED)
+        display = ScreenMode(args.fullscreen or zenstation_on())
+        screen = display.screen
     skip_title = args.no_title or args.scene is not None or args.frames is not None or args.screenshot is not None
     if args.scene in ("title", "title_top10"):
         skip_title = False
-    headless = args.screenshot is not None or args.frames is not None or args.scene is not None
     # Headless test runs never touch the network or the player's score file.
     netplay = args.host or args.join is not None
     if netplay:
@@ -4720,27 +5353,49 @@ def main(argv=None):
 
     if not headless:
         clock = pygame.time.Clock()
+        pads = Gamepads()
         running = True
         while running:
             clock.tick(60)
-            now = pygame.time.get_ticks()
+            raw = pygame.time.get_ticks()
+            now = game.clock_now(raw)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
+                    # A paused game wakes on a key (Esc still quits, F still toggles).
+                    if game.paused and event.key not in (pygame.K_ESCAPE, pygame.K_f):
+                        game.toggle_pause(raw)
+                        now = game.clock_now(raw)
+                        continue
                     if event.key == pygame.K_ESCAPE and not game.wants_text():
                         running = False
                     elif event.key == pygame.K_f and not game.wants_text():
-                        pygame.display.toggle_fullscreen()
+                        screen = display.toggle()
                     else:
                         game.on_key(event.key, now, getattr(event, "unicode", ""))
+                else:
+                    pads.handle_event(event)
             if not running:
                 break
+            pads.poll(raw, game.clock_now(raw))
+            if apply_pad(game, pads, raw) == "quit":
+                game._net_close()  # drop a LAN game on the way out
+                break  # Back/Share held: back to the launcher, exit code 0
+            now = game.clock_now(raw)
+            game.using_pad = pads.connected()
             keys = pygame.key.get_pressed()
-            game.secret_keys(keys, now)
-            game.level_keys(keys, now)
-            game.hold_action(keys, now)
-            game.update(now)
+            # Single player: the pause really stops the clock (update is skipped).
+            # A network game keeps updating so the link, the other player and the
+            # Daleks do not freeze; only this player's controls are held.
+            if not game.paused:
+                game.secret_keys(keys, now)
+                game.level_keys(keys, now)
+                game.hold_action(keys, now, pads.as_dirs())
+            if not game.paused or game.net is not None:
+                game.update(now)
+            if display.fullscreen:
+                _hide_mouse()
             game.draw(screen, now)
             pygame.display.flip()
         pygame.quit()
