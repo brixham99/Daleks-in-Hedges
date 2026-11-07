@@ -1801,7 +1801,7 @@ def open_fullscreen() -> pygame.Surface:
                 pass
     try:
         pygame.display.set_window_position((0, 0))
-    except pygame.error:
+    except (pygame.error, AttributeError):
         pass  # Wayland does not allow moving the window; fullscreen covers it
     _hide_mouse()
     return screen
