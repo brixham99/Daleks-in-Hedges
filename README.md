@@ -1,5 +1,7 @@
 # Daleks in Hedges
 
+![Daleks in Hedges screenshot](docs/screenshot.png)
+
 An isometric hedge-maze stealth game. Play as Archie or Holly, dodge the Daleks and reach the TARDIS in the far corner to escape to the next level: a new maze with more Daleks.
 
 ## Install
